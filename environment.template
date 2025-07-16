@@ -1,0 +1,34 @@
+# Production Environment Configuration for Bayaan LiveKit Agent
+
+# Environment
+ENVIRONMENT=production
+
+# LiveKit Configuration
+LIVEKIT_URL=wss://your-livekit-server.com
+LIVEKIT_API_KEY=your-livekit-api-key
+LIVEKIT_API_SECRET=your-livekit-api-secret
+
+# OpenAI Configuration
+OPENAI_API_KEY=your-openai-api-key
+
+# Speechmatics Configuration (optional)
+SPEECHMATICS_API_KEY=your-speechmatics-api-key
+
+# Supabase Configuration
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+SUPABASE_ANON_KEY=your-anon-key
+
+# Agent Configuration
+AGENT_NAME=bayaan-transcriber
+WORKER_TYPE=background
+MAX_WORKERS=2
+IDLE_TIMEOUT=300
+PERSISTENT_MODE=true
+
+# Logging Configuration
+LOG_LEVEL=INFO
+
+# Python Configuration
+PYTHONPATH=/app
+PYTHONUNBUFFERED=1 
