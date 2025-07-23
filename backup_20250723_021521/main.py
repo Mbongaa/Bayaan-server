@@ -1,0 +1,601 @@
+import asyncio
+import logging
+import json
+import time
+import re
+import os
+from typing import Set, Any, Dict, Optional
+from collections import defaultdict, deque
+from datetime import datetime, timedelta
+
+from enum import Enum
+from dataclasses import dataclass, asdict
+
+from livekit import rtc
+from livekit.agents import (
+    AutoSubscribe,
+    JobContext,
+    JobProcess,
+    JobRequest,
+    WorkerOptions,
+    cli,
+    stt,
+    utils,
+)
+from livekit.plugins import silero, speechmatics
+from livekit.plugins.speechmatics.types import TranscriptionConfig
+
+# Import configuration
+from config import get_config, ApplicationConfig
+
+# Import database operations
+from database import (
+    ensure_active_session,
+    store_transcript_in_database,
+    query_room_by_name,
+    get_active_session_for_room,
+    broadcast_to_channel,
+    close_database_connections
+)
+
+# Import text processing and translation helpers
+from text_processing import extract_complete_sentences
+from translation_helpers import translate_sentences
+
+# Import Translator class
+from translator import Translator
+
+# Import broadcasting function
+from broadcasting import broadcast_to_displays
+
+# Import resource management
+from resource_management import ResourceManager, TaskManager, STTStreamManager
+
+# Import webhook handler for room context
+try:
+    from webhook_handler import get_room_context as get_webhook_room_context
+except ImportError:
+    # Webhook handler not available, use empty context
+    def get_webhook_room_context(room_name: str):
+        return {}
+
+
+# Load configuration
+config = get_config()
+
+logger = logging.getLogger("transcriber")
+
+
+@dataclass
+class Language:
+    code: str
+    name: str
+    flag: str
+
+
+# Build languages dictionary from config
+languages = {}
+for code, lang_info in config.translation.supported_languages.items():
+    languages[code] = Language(
+        code=code,
+        name=lang_info["name"],
+        flag=lang_info["flag"]
+    )
+
+LanguageCode = Enum(
+    "LanguageCode",  # Name of the Enum
+    {lang.name: code for code, lang in languages.items()},  # Enum entries: name -> code mapping
+)
+
+
+# Translator class has been moved to translator.py
+
+
+def prewarm(proc: JobProcess):
+    proc.userdata["vad"] = silero.VAD.load()
+
+
+async def entrypoint(job: JobContext):
+    # Configure source language - ARABIC as default
+    # This will be the language that users are actually speaking (host/speaker language)
+    source_language = config.translation.default_source_language
+    
+    # Initialize resource manager
+    resource_manager = ResourceManager()
+    
+    # Extract tenant context from room metadata or webhook handler
+    tenant_context = {}
+    try:
+        # Try to query Supabase directly for room information
+        if job.room and job.room.name:
+            logger.info(f"🔍 Looking up room context for: {job.room.name}")
+            
+            # Check if database is configured
+            logger.info(f"🔑 Supabase URL: {config.supabase.url}")
+            logger.info(f"🔑 Supabase key available: {'Yes' if config.supabase.service_role_key else 'No'}")
+            
+            if config.supabase.service_role_key:
+                try:
+                    # Query room by LiveKit room name using the new database module
+                    logger.info(f"🔍 Querying database for room: {job.room.name}")
+                    # Query room directly without task wrapper
+                    room_data = await query_room_by_name(job.room.name)
+                    
+                    if room_data:
+                        tenant_context = {
+                            "room_id": room_data.get("id"),
+                            "mosque_id": room_data.get("mosque_id"),
+                            "room_title": room_data.get("Title"),
+                            "transcription_language": room_data.get("transcription_language", "ar"),
+                            "translation_language": room_data.get("translation__language", "nl"),
+                            "created_at": room_data.get("created_at")
+                        }
+                        # Also store the double underscore version for compatibility
+                        if room_data.get("translation__language"):
+                            tenant_context["translation__language"] = room_data.get("translation__language")
+                        
+                        logger.info(f"✅ Found room in database: room_id={tenant_context.get('room_id')}, mosque_id={tenant_context.get('mosque_id')}")
+                        logger.info(f"🗣️ Languages: transcription={tenant_context.get('transcription_language')}, translation={tenant_context.get('translation_language')} (or {tenant_context.get('translation__language')})")
+                        
+                        # Try to get active session for this room
+                        session_id = await get_active_session_for_room(tenant_context['room_id'])
+                        if session_id:
+                            tenant_context["session_id"] = session_id
+                            logger.info(f"📝 Found active session: {tenant_context['session_id']}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not query Supabase: {e}")
+        
+        # Fallback to webhook handler if available
+        if not tenant_context:
+            webhook_context = get_webhook_room_context(job.room.name if job.room else "")
+            if webhook_context:
+                tenant_context = {
+                    "room_id": webhook_context.get("room_id"),
+                    "mosque_id": webhook_context.get("mosque_id"),
+                    "session_id": webhook_context.get("session_id"),
+                    "room_title": webhook_context.get("room_title"),
+                    "transcription_language": webhook_context.get("transcription_language", "ar"),
+                    "translation_language": webhook_context.get("translation_language", "nl"),
+                    "created_at": webhook_context.get("created_at")
+                }
+                logger.info(f"🏢 Tenant context from webhook handler: mosque_id={tenant_context.get('mosque_id')}, room_id={tenant_context.get('room_id')}")
+        
+        # Fallback to room metadata if available
+        if not tenant_context and job.room and job.room.metadata:
+            try:
+                metadata = json.loads(job.room.metadata)
+                tenant_context = {
+                    "room_id": metadata.get("room_id"),
+                    "mosque_id": metadata.get("mosque_id"),
+                    "session_id": metadata.get("session_id"),
+                    "room_title": metadata.get("room_title"),
+                    "transcription_language": metadata.get("transcription_language", "ar"),
+                    "translation_language": metadata.get("translation_language", "nl"),
+                    "created_at": metadata.get("created_at")
+                }
+                logger.info(f"🏢 Tenant context from room metadata: mosque_id={tenant_context.get('mosque_id')}, room_id={tenant_context.get('room_id')}")
+            except:
+                pass
+        
+        # Final fallback to default context with hardcoded values for testing
+        if not tenant_context:
+            logger.warning(f"⚠️ No tenant context available for room: {job.room.name if job.room else 'unknown'}")
+            # TEMPORARY: Use hardcoded values for mosque_546012 rooms
+            if job.room and f"mosque_{config.test_mosque_id}" in job.room.name:
+                tenant_context = {
+                    "room_id": config.test_room_id,
+                    "mosque_id": config.test_mosque_id,
+                    "session_id": None,
+                    "transcription_language": "ar",
+                    "translation_language": "nl"
+                }
+                logger.info(f"🔧 Using hardcoded tenant context for testing: mosque_id={tenant_context['mosque_id']}, room_id={tenant_context['room_id']}")
+            else:
+                tenant_context = {
+                    "room_id": None,
+                    "mosque_id": int(os.getenv('DEFAULT_MOSQUE_ID', str(config.default_mosque_id))),
+                    "session_id": None,
+                    "transcription_language": "ar",
+                    "translation_language": "nl"
+                }
+    except Exception as e:
+        logger.warning(f"⚠️ Could not extract tenant context: {e}")
+    
+    # Configure Speechmatics STT with room-specific settings
+    # Use tenant_context which already has room configuration
+    room_config = None
+    if tenant_context and tenant_context.get('room_id'):
+        # We already have the room data in tenant_context from earlier query
+        room_config = tenant_context
+        logger.info(f"📋 Using room-specific configuration from context: "
+                  f"lang={room_config.get('transcription_language', 'ar')}, "
+                  f"target={room_config.get('translation_language', 'nl')}, "
+                  f"delay={room_config.get('max_delay', 2.0)}, "
+                  f"punct={room_config.get('punctuation_sensitivity', 0.5)}")
+        
+        # If we need full room data and it's not in context, query it
+        if not room_config.get('max_delay'):
+            try:
+                full_room_data = await query_room_by_name(job.room.name if job.room else None)
+                if full_room_data:
+                    # Merge the full room data with tenant context
+                    room_config.update({
+                        'max_delay': full_room_data.get('max_delay'),
+                        'punctuation_sensitivity': full_room_data.get('punctuation_sensitivity'),
+                        'translation__language': full_room_data.get('translation__language')
+                    })
+                    logger.info(f"📋 Fetched additional room config: delay={room_config.get('max_delay')}, punct={room_config.get('punctuation_sensitivity')}")
+            except Exception as e:
+                logger.warning(f"Failed to fetch additional room config: {e}")
+    
+    # Create STT configuration with room-specific overrides
+    stt_config = config.speechmatics.with_room_settings(room_config)
+    
+    # Initialize STT provider with configured settings
+    stt_provider = speechmatics.STT(
+        transcription_config=TranscriptionConfig(
+            language=stt_config.language,
+            operating_point=stt_config.operating_point,
+            enable_partials=stt_config.enable_partials,
+            max_delay=stt_config.max_delay,
+            punctuation_overrides={"sensitivity": stt_config.punctuation_sensitivity},
+            diarization=stt_config.diarization
+        )
+    )
+    
+    # Update source language based on room config
+    source_language = config.translation.get_source_language(room_config)
+    logger.info(f"🗣️ STT configured for {languages[source_language].name} speech recognition")
+    
+    translators = {}
+    
+    # Get target language from room config or use default
+    target_language = config.translation.get_target_language(room_config)
+    logger.info(f"🎯 Target language resolved to: '{target_language}' (from room_config: {room_config.get('translation_language') if room_config else 'None'} or {room_config.get('translation__language') if room_config else 'None'})")
+    
+    # Create translator for the configured target language
+    if target_language in languages:
+        # Get language enum dynamically
+        lang_info = languages[target_language]
+        lang_enum = getattr(LanguageCode, lang_info.name)
+        translators[target_language] = Translator(job.room, lang_enum, tenant_context, broadcast_to_displays)
+        logger.info(f"📝 Initialized {lang_info.name} translator ({target_language})")
+    else:
+        logger.warning(f"⚠️ Target language '{target_language}' not supported, falling back to Dutch")
+        dutch_enum = getattr(LanguageCode, 'Dutch')
+        translators["nl"] = Translator(job.room, dutch_enum, tenant_context, broadcast_to_displays)
+    
+    # Sentence accumulation for proper sentence-by-sentence translation
+    accumulated_text = ""  # Accumulates text until we get a complete sentence
+    last_final_transcript = ""  # Keep track of the last final transcript to avoid duplicates
+    
+    logger.info(f"🚀 Starting entrypoint for room: {job.room.name if job.room else 'unknown'}")
+    logger.info(f"🔍 Translators dict ID: {id(translators)}")
+    logger.info(f"🎯 Configuration: {languages[source_language].name} → {languages.get(target_language, languages['nl']).name}")
+    logger.info(f"⚙️ STT Settings: delay={stt_config.max_delay}s, punctuation={stt_config.punctuation_sensitivity}")
+
+    async def _forward_transcription(
+        stt_stream: stt.SpeechStream,
+        track: rtc.Track,
+    ):
+        """Forward the transcription and log the transcript in the console"""
+        nonlocal accumulated_text, last_final_transcript
+        
+        try:
+            async for ev in stt_stream:
+                # Log to console for interim (word-by-word)
+                if ev.type == stt.SpeechEventType.INTERIM_TRANSCRIPT:
+                    print(ev.alternatives[0].text, end="", flush=True)
+                    
+                    # Publish interim transcription for real-time word-by-word display
+                    interim_text = ev.alternatives[0].text.strip()
+                    if interim_text:
+                        try:
+                            interim_segment = rtc.TranscriptionSegment(
+                                id=utils.misc.shortuuid("SG_"),
+                                text=interim_text,
+                                start_time=0,
+                                end_time=0,
+                                language=source_language,  # Arabic
+                                final=False,  # This is interim, not final
+                            )
+                            interim_transcription = rtc.Transcription(
+                                job.room.local_participant.identity, "", [interim_segment]
+                            )
+                            await job.room.local_participant.publish_transcription(interim_transcription)
+                        except Exception as e:
+                            logger.debug(f"Failed to publish interim transcription: {str(e)}")
+                    
+                elif ev.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
+                    print("\n")
+                    final_text = ev.alternatives[0].text.strip()
+                    print(" -> ", final_text)
+                    logger.info(f"Final Arabic transcript: {final_text}")
+
+                    if final_text and final_text != last_final_transcript:
+                        last_final_transcript = final_text
+                        
+                        # Publish final transcription for the original language (Arabic)
+                        try:
+                            final_segment = rtc.TranscriptionSegment(
+                                id=utils.misc.shortuuid("SG_"),
+                                text=final_text,
+                                start_time=0,
+                                end_time=0,
+                                language=source_language,  # Arabic
+                                final=True,
+                            )
+                            final_transcription = rtc.Transcription(
+                                job.room.local_participant.identity, "", [final_segment]
+                            )
+                            await job.room.local_participant.publish_transcription(final_transcription)
+                            
+                            logger.info(f"✅ Published final {languages[source_language].name} transcription: '{final_text}'")
+                        except Exception as e:
+                            logger.error(f"❌ Failed to publish final transcription: {str(e)}")
+                        
+                        # Broadcast final transcription text for real-time display
+                        print(f"📡 Broadcasting Arabic text to frontend: '{final_text}'")
+                        # Broadcast directly without task wrapper
+                        await broadcast_to_displays("transcription", source_language, final_text, tenant_context)
+                        
+                        # Handle translation logic
+                        if translators:
+                            # SIMPLE ACCUMULATION LOGIC - ONLY APPEND, NEVER REPLACE
+                            if accumulated_text:
+                                # ALWAYS append new final transcript to existing accumulated text
+                                accumulated_text = accumulated_text.strip() + " " + final_text
+                            else:
+                                # First transcript - start accumulation
+                                accumulated_text = final_text
+                            
+                            logger.info(f"📝 Updated accumulated Arabic text: '{accumulated_text}'")
+                            
+                            # Extract complete sentences from accumulated text
+                            complete_sentences, remaining_text = extract_complete_sentences(accumulated_text)
+                            
+                            # Handle special punctuation completion signal
+                            if complete_sentences and complete_sentences[0] == "PUNCTUATION_COMPLETE":
+                                if accumulated_text.strip():
+                                    # Complete the accumulated sentence with this punctuation
+                                    print(f"📝 PUNCTUATION SIGNAL: Completing accumulated text: '{accumulated_text}'")
+                                    
+                                    # Translate the completed sentence (don't include the punctuation marker)
+                                    await translate_sentences([accumulated_text], translators, source_language)
+                                    
+                                    # Clear accumulated text as sentence is now complete
+                                    accumulated_text = ""
+                                    print(f"📝 Cleared accumulated text after punctuation completion")
+                                else:
+                                    print(f"⚠️ Received punctuation completion signal but no accumulated text")
+                            elif complete_sentences:
+                                # We have complete sentences - translate them immediately
+                                print(f"🎯 Found {len(complete_sentences)} complete Arabic sentences: {complete_sentences}")
+                                
+                                # Translate complete sentences
+                                await translate_sentences(complete_sentences, translators, source_language)
+                                
+                                # Update accumulated text to only remaining incomplete text
+                                accumulated_text = remaining_text
+                                print(f"📝 Updated accumulated Arabic text after sentence extraction: '{accumulated_text}'")
+                            
+                            # Log remaining incomplete text (no delayed translation)
+                            if accumulated_text.strip():
+                                logger.info(f"📝 Incomplete Arabic text remaining: '{accumulated_text}'")
+                                # Note: Incomplete text will be translated when the next sentence completes
+                        else:
+                            logger.warning(f"⚠️ No translators available in room {job.room.name}, only {languages[source_language].name} transcription published")
+                    else:
+                        logger.debug("Empty or duplicate transcription, skipping")
+        except Exception as e:
+            logger.error(f"STT transcription error: {str(e)}")
+            raise
+
+    async def transcribe_track(participant: rtc.RemoteParticipant, track: rtc.Track):
+        logger.info(f"🎤 Starting Arabic transcription for participant {participant.identity}, track {track.sid}")
+        
+        try:
+            audio_stream = rtc.AudioStream(track)
+            
+            # Use context manager for STT stream
+            async with resource_manager.stt_manager.create_stream(stt_provider, participant.identity) as stt_stream:
+                # Create transcription task with tracking
+                stt_task = resource_manager.task_manager.create_task(
+                    _forward_transcription(stt_stream, track),
+                    name=f"transcribe-{participant.identity}",
+                    metadata={"participant": participant.identity, "track": track.sid}
+                )
+                
+                frame_count = 0
+                async for ev in audio_stream:
+                    frame_count += 1
+                    if frame_count % 100 == 0:  # Log every 100 frames to avoid spam
+                        logger.debug(f"🔊 Received audio frame #{frame_count} from {participant.identity}")
+                    stt_stream.push_frame(ev.frame)
+                    
+                logger.warning(f"🔇 Audio stream ended for {participant.identity}")
+                
+                # Cancel the transcription task if still running
+                if not stt_task.done():
+                    stt_task.cancel()
+                    try:
+                        await stt_task
+                    except asyncio.CancelledError:
+                        logger.debug(f"STT task cancelled for {participant.identity}")
+                        
+        except Exception as e:
+            logger.error(f"❌ Transcription track error for {participant.identity}: {str(e)}")
+        
+        logger.info(f"🧹 Transcription cleanup completed for {participant.identity}")
+
+    @job.room.on("track_subscribed")
+    def on_track_subscribed(
+        track: rtc.Track,
+        publication: rtc.TrackPublication,
+        participant: rtc.RemoteParticipant,
+    ):
+        logger.info(f"🎵 Track subscribed: {track.kind} from {participant.identity} (track: {track.sid})")
+        logger.info(f"Track details - muted: {publication.muted}")
+        if track.kind == rtc.TrackKind.KIND_AUDIO:
+            logger.info(f"✅ Adding Arabic transcriber for participant: {participant.identity}")
+            resource_manager.task_manager.create_task(
+                transcribe_track(participant, track),
+                name=f"track-handler-{participant.identity}",
+                metadata={"participant": participant.identity, "track": track.sid}
+            )
+        else:
+            logger.info(f"❌ Ignoring non-audio track: {track.kind}")
+
+    @job.room.on("track_published")
+    def on_track_published(publication: rtc.TrackPublication, participant: rtc.RemoteParticipant):
+        logger.info(f"📡 Track published: {publication.kind} from {participant.identity} (track: {publication.sid})")
+        logger.info(f"Publication details - muted: {publication.muted}")
+
+    @job.room.on("track_unpublished") 
+    def on_track_unpublished(publication: rtc.TrackPublication, participant: rtc.RemoteParticipant):
+        logger.info(f"📡 Track unpublished: {publication.kind} from {participant.identity}")
+
+    @job.room.on("participant_connected")
+    def on_participant_connected(participant: rtc.RemoteParticipant):
+        logger.info(f"👥 Participant connected: {participant.identity}")
+        
+        # Try to extract metadata from participant if available
+        if hasattr(participant, 'metadata') and participant.metadata:
+            try:
+                participant_metadata = json.loads(participant.metadata)
+                if participant_metadata:
+                    # Update tenant context with participant metadata
+                    tenant_context.update({
+                        "room_id": participant_metadata.get("room_id", tenant_context.get("room_id")),
+                        "mosque_id": participant_metadata.get("mosque_id", tenant_context.get("mosque_id")),
+                        "session_id": participant_metadata.get("session_id", tenant_context.get("session_id")),
+                        "room_title": participant_metadata.get("room_title", tenant_context.get("room_title"))
+                    })
+                    logger.info(f"📋 Updated tenant context from participant metadata: {tenant_context}")
+                    
+                    # Update all translators with new context
+                    for translator in translators.values():
+                        translator.tenant_context = tenant_context
+            except Exception as e:
+                logger.debug(f"Could not parse participant metadata: {e}")
+
+    @job.room.on("participant_disconnected")
+    def on_participant_disconnected(participant: rtc.RemoteParticipant):
+        logger.info(f"👥 Participant disconnected: {participant.identity}")
+        
+        # Resource cleanup is now handled by ResourceManager
+        # Log current resource statistics
+        resource_manager.log_stats()
+        logger.info(f"🧹 Participant cleanup completed for {participant.identity}")
+
+    @job.room.on("participant_attributes_changed")
+    def on_attributes_changed(
+        changed_attributes: dict[str, str], participant: rtc.Participant
+    ):
+        """
+        When participant attributes change, handle new translation requests.
+        """
+        logger.info(f"🌍 Participant {participant.identity} attributes changed: {changed_attributes}")
+        lang = changed_attributes.get("captions_language", None)
+        if lang:
+            if lang == source_language:
+                logger.info(f"✅ Participant {participant.identity} requested {languages[source_language].name} (source language - Arabic)")
+            elif lang in translators:
+                logger.info(f"✅ Participant {participant.identity} requested existing language: {lang}")
+                logger.info(f"📊 Current translators for this room: {list(translators.keys())}")
+            else:
+                # Check if the language is supported and different from source language
+                if lang in languages:
+                    try:
+                        # Create a translator for the requested language using the language enum
+                        language_obj = languages[lang]
+                        language_enum = getattr(LanguageCode, language_obj.name)
+                        translators[lang] = Translator(job.room, language_enum, tenant_context, broadcast_to_displays)
+                        logger.info(f"🆕 Added translator for ROOM {job.room.name} (requested by {participant.identity}), language: {language_obj.name}")
+                        logger.info(f"🏢 Translator created with tenant context: mosque_id={tenant_context.get('mosque_id')}")
+                        logger.info(f"📊 Total translators for room {job.room.name}: {len(translators)} -> {list(translators.keys())}")
+                        logger.info(f"🔍 Translators dict ID: {id(translators)}")
+                        
+                        # Debug: Verify the translator was actually added
+                        if lang in translators:
+                            logger.info(f"✅ Translator verification: {lang} successfully added to room translators")
+                        else:
+                            logger.error(f"❌ Translator verification FAILED: {lang} not found in translators dict")
+                            
+                    except Exception as e:
+                        logger.error(f"❌ Error creating translator for {lang}: {str(e)}")
+                else:
+                    logger.warning(f"❌ Unsupported language requested by {participant.identity}: {lang}")
+                    logger.info(f"💡 Supported languages: {list(languages.keys())}")
+        else:
+            logger.debug(f"No caption language change for participant {participant.identity}")
+
+    logger.info("Connecting to room...")
+    await job.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+    logger.info(f"Successfully connected to room: {job.room.name}")
+    logger.info(f"📡 Real-time transcription data will be sent via Supabase Broadcast")
+    
+    # Debug room state after connection
+    logger.info(f"Room participants: {len(job.room.remote_participants)}")
+    for participant in job.room.remote_participants.values():
+        logger.info(f"Participant: {participant.identity}")
+        logger.info(f"  Audio tracks: {len(participant.track_publications)}")
+        for sid, pub in participant.track_publications.items():
+            logger.info(f"    Track {sid}: {pub.kind}, muted: {pub.muted}")
+
+    # Also check local participant
+    logger.info(f"Local participant: {job.room.local_participant.identity}")
+    logger.info(f"Local participant tracks: {len(job.room.local_participant.track_publications)}")
+
+    @job.room.local_participant.register_rpc_method("get/languages")
+    async def get_languages(data: rtc.RpcInvocationData):
+        languages_list = [asdict(lang) for lang in languages.values()]
+        return json.dumps(languages_list)
+
+    @job.room.on("disconnected")
+    def on_room_disconnected():
+        """Handle room disconnection - cleanup all resources"""
+        logger.info("🚪 Room disconnected, starting cleanup...")
+        
+        # Create async task for cleanup
+        async def cleanup():
+            # Log final resource statistics
+            resource_manager.log_stats()
+            
+            # Shutdown resource manager (cancels all tasks, closes all streams)
+            await resource_manager.shutdown()
+            
+            # Close database connections
+            try:
+                await close_database_connections()
+                logger.info("✅ Database connections closed")
+                
+                # Force cleanup of any remaining sessions
+                import gc
+                gc.collect()  # Force garbage collection
+                await asyncio.sleep(0.1)  # Give time for cleanup
+            except Exception as e:
+                logger.debug(f"Database cleanup error: {e}")
+            
+            logger.info("✅ Room cleanup completed")
+        
+        # Run cleanup in the event loop
+        asyncio.create_task(cleanup())
+
+
+async def request_fnc(req: JobRequest):
+    logger.info(f"🎯 Received job request for room: {req.room.name if req.room else 'unknown'}")
+    logger.info(f"📋 Request details: job_id={req.id}, room_name={req.room.name if req.room else 'unknown'}")
+    await req.accept(
+        name="agent",
+        identity="agent",
+    )
+    logger.info(f"✅ Accepted job request for room: {req.room.name if req.room else 'unknown'}")
+
+
+if __name__ == "__main__":
+    cli.run_app(
+        WorkerOptions(
+            entrypoint_fnc=entrypoint, prewarm_fnc=prewarm, request_fnc=request_fnc
+        )
+    )

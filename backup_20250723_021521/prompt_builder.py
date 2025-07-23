@@ -21,13 +21,13 @@ class PromptBuilder:
     # Default fallback prompt if no template is found
     DEFAULT_PROMPT = (
         "You are an expert simultaneous interpreter. Your task is to translate from {source_lang} to {target_lang}. "
-        "Provide a direct and accurate translation of the user's input. "
-        "Do not add any additional commentary, explanations, or introductory phrases. "
-        "Be concise for real-time delivery."
+        "Provide a direct and accurate translation of the user's input. Be concise and use natural-sounding language. "
+        "Do not add any additional commentary, explanations, or introductory phrases."
     )
     
     def __init__(self):
         """Initialize the prompt builder."""
+        self.cached_templates = {}
         logger.info("🎨 PromptBuilder initialized")
     
     async def get_prompt_for_room(
@@ -56,12 +56,8 @@ class PromptBuilder:
                 template = await self._fetch_template_for_room(room_id)
             
             if template:
-                prompt = template.get('prompt_template', self.DEFAULT_PROMPT)
-                # Ensure template_variables is always a dict, never None
-                variables = template.get('template_variables') or {}
-                if not isinstance(variables, dict):
-                    logger.warning(f"template_variables is not a dict: {type(variables)}, using empty dict")
-                    variables = {}
+                prompt = template['prompt_template']
+                variables = template.get('template_variables', {})
                 logger.info(f"📋 Using prompt template: {template.get('name', 'Unknown')}")
             else:
                 # Use default prompt
@@ -110,15 +106,17 @@ class PromptBuilder:
             Template dictionary or None
         """
         try:
-            # Always fetch fresh from database - no caching for production
+            # Check cache first
+            cache_key = f"room_{room_id}"
+            if cache_key in self.cached_templates:
+                return self.cached_templates[cache_key]
+            
+            # Fetch from database
             template = await query_prompt_template_for_room(room_id)
             
             if template:
-                # Log what we received for debugging
-                logger.info(f"📋 Fetched template for room {room_id}: {template.get('name', 'Unknown')}")
-                logger.debug(f"Template data: {template}")
-            else:
-                logger.info(f"📋 No template found for room {room_id}")
+                # Cache for future use (5 minute cache)
+                self.cached_templates[cache_key] = template
                 
             return template
             
