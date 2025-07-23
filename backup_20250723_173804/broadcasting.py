@@ -5,7 +5,6 @@ Handles real-time broadcasting of transcriptions and translations to displays.
 import asyncio
 import logging
 import hashlib
-import uuid
 from typing import Optional, Dict, Any
 from datetime import datetime
 
@@ -25,8 +24,7 @@ async def broadcast_to_displays(
     message_type: str, 
     language: str, 
     text: str, 
-    tenant_context: Optional[Dict[str, Any]] = None,
-    sentence_context: Optional[Dict[str, Any]] = None
+    tenant_context: Optional[Dict[str, Any]] = None
 ) -> bool:
     """
     Send transcription/translation to frontend via Supabase Broadcast and store in database.
@@ -40,7 +38,6 @@ async def broadcast_to_displays(
         language: Language code (e.g., "ar", "nl")
         text: The text content to broadcast
         tenant_context: Optional context containing room_id, mosque_id, etc.
-        sentence_context: Optional context for sentence tracking (sentence_id, is_complete, etc.)
         
     Returns:
         bool: True if broadcast was successful, False otherwise
@@ -61,27 +58,16 @@ async def broadcast_to_displays(
             text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()[:8]
             msg_id = f"{timestamp}_{text_hash}"
             
-            # Build payload with optional sentence context
-            data_payload = {
-                "text": text,
-                "language": language,
-                "timestamp": timestamp,
-                "msg_id": msg_id
-            }
-            
-            # Add sentence context if provided
-            if sentence_context:
-                data_payload.update({
-                    "sentence_id": sentence_context.get("sentence_id"),
-                    "is_complete": sentence_context.get("is_complete", False),
-                    "is_fragment": sentence_context.get("is_fragment", True)
-                })
-            
             payload = {
                 "type": message_type,
                 "room_id": tenant_context["room_id"],
                 "mosque_id": tenant_context["mosque_id"],
-                "data": data_payload
+                "data": {
+                    "text": text,
+                    "language": language,
+                    "timestamp": timestamp,
+                    "msg_id": msg_id
+                }
             }
             
             # Use the broadcast_to_channel function from database module

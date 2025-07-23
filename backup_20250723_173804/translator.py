@@ -75,13 +75,13 @@ class Translator:
         # Initialize prompt asynchronously on first use
         self._prompt_initialized = False
 
-    async def translate(self, message: str, sentence_id: Optional[str] = None, max_retries: int = 2) -> str:
+    async def translate(self, message: str, track: Optional[rtc.Track] = None, max_retries: int = 2) -> str:
         """
         Translate a message from source to target language.
         
         Args:
             message: Text to translate
-            sentence_id: Optional sentence ID for tracking
+            track: Optional audio track reference
             max_retries: Maximum number of retry attempts on failure
             
         Returns:
@@ -103,10 +103,10 @@ class Translator:
                 
                 if translated_message:
                     # Publish transcription to LiveKit room
-                    await self._publish_transcription(translated_message, None)
+                    await self._publish_transcription(translated_message, track)
                     
                     # Broadcast to displays
-                    await self._broadcast_translation(translated_message, sentence_id)
+                    await self._broadcast_translation(translated_message)
                     
                     # Update statistics
                     self.translation_count += 1
@@ -262,33 +262,22 @@ class Translator:
             logger.error(f"Failed to publish transcription: {e}")
             # Don't re-raise - translation was successful even if publishing failed
 
-    async def _broadcast_translation(self, translated_text: str, sentence_id: Optional[str] = None) -> None:
+    async def _broadcast_translation(self, translated_text: str) -> None:
         """
         Broadcast the translation to WebSocket displays.
         
         Args:
             translated_text: The translated text to broadcast
-            sentence_id: Optional sentence ID for tracking
         """
         if self.broadcast_callback:
             try:
                 # Use asyncio.create_task to avoid blocking
-                # Include sentence context if provided
-                sentence_context = None
-                if sentence_id:
-                    sentence_context = {
-                        "sentence_id": sentence_id,
-                        "is_complete": True,
-                        "is_fragment": False
-                    }
-                
                 asyncio.create_task(
                     self.broadcast_callback(
                         "translation", 
                         self.lang.value, 
                         translated_text, 
-                        self.tenant_context,
-                        sentence_context
+                        self.tenant_context
                     )
                 )
                 logger.debug(f"📡 Broadcasted {self.lang.value} translation to displays")

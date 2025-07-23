@@ -12,8 +12,7 @@ logger = logging.getLogger("transcriber.translation")
 async def translate_sentences(
     sentences: List[str], 
     translators: Dict[str, Any],
-    source_language: str = "ar",
-    sentence_id: Optional[str] = None
+    source_language: str = "ar"
 ) -> None:
     """
     Translate complete sentences to all target languages.
@@ -25,7 +24,6 @@ async def translate_sentences(
         sentences: List of sentences to translate
         translators: Dictionary of language code to translator instances
         source_language: Source language code (default: "ar" for Arabic)
-        sentence_id: Optional sentence ID for tracking
     """
     if not sentences or not translators:
         return
@@ -39,7 +37,7 @@ async def translate_sentences(
             translation_tasks = []
             for lang, translator in translators.items():
                 logger.info(f"📤 Sending complete {source_language.upper()} sentence '{sentence}' to {lang} translator")
-                translation_tasks.append(translator.translate(sentence, sentence_id))
+                translation_tasks.append(translator.translate(sentence, None))
             
             # Execute all translations concurrently
             if translation_tasks:

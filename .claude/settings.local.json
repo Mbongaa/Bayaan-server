@@ -7,6 +7,12 @@
       "Bash(find:*)",
       "Bash(ls:*)",
       "Bash(diff:*)",
+      "Bash(cd:*)",
+      "Bash(cd:*)",
+      "Bash(cd:*)",
+      "Bash(dos2unix:*)",
+      "Bash(sed:*)",
+      "Bash(cd:*)",
       "Bash(cd:*)"
     ],
     "deny": []
