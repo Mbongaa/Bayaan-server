@@ -63,8 +63,6 @@ class PromptBuilder:
                     logger.warning(f"template_variables is not a dict: {type(variables)}, using empty dict")
                     variables = {}
                 logger.info(f"📋 Using prompt template: {template.get('name', 'Unknown')}")
-                logger.info(f"📋 Template text: {prompt[:100]}...")
-                logger.info(f"📋 Template variables from DB: {variables}")
             else:
                 # Use default prompt
                 prompt = self.DEFAULT_PROMPT
@@ -72,19 +70,11 @@ class PromptBuilder:
                 logger.info("📋 Using default prompt template")
             
             # Prepare substitution variables
-            # Support both naming conventions for backwards compatibility
             substitutions = {
                 'source_lang': source_lang,
-                'source_language': source_lang,  # Also provide source_language for templates
                 'target_lang': target_lang,
-                'target_language': target_lang,  # Also provide target_language for templates
+                **variables  # Include template-specific variables
             }
-            
-            # Merge template variables, ensuring we handle nested values
-            if variables:
-                substitutions.update(variables)
-                # Log what variables we're using
-                logger.debug(f"Template variables: {variables}")
             
             # Add room-specific context if available
             if room_config:
@@ -94,29 +84,10 @@ class PromptBuilder:
                     substitutions['speaker_role'] = room_config['speaker_role']
             
             # Format the prompt with variables
-            try:
-                formatted_prompt = prompt.format(**substitutions)
-            except KeyError as e:
-                logger.warning(f"Missing variable in template: {e}. Using partial formatting.")
-                # Use safe substitution that ignores missing keys
-                from string import Template
-                safe_template = Template(prompt.replace('{', '${'))
-                formatted_prompt = safe_template.safe_substitute(**substitutions)
-                # Replace any remaining ${var} with empty string
-                import re
-                formatted_prompt = re.sub(r'\$\{[^}]+\}', '', formatted_prompt)
-            
-            # Add critical translation instruction if missing
-            if template and not any(word in formatted_prompt.lower() for word in ["translate", "translating", "translation", "translator"]):
-                logger.warning("Template missing explicit translation instruction, adding prefix")
-                formatted_prompt = f"IMPORTANT: You must ONLY translate the text, do not respond or react to it. {formatted_prompt}"
-            
-            # Log successful template usage
-            if template:
-                logger.info(f"✅ Successfully formatted custom prompt template: {template.get('name', 'Unknown')}")
+            formatted_prompt = prompt.format(**substitutions)
             
             # Log the generated prompt for debugging
-            logger.info(f"Generated prompt: {formatted_prompt}")
+            logger.debug(f"Generated prompt: {formatted_prompt[:100]}...")
             
             return formatted_prompt
             

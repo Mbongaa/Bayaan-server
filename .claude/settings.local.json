@@ -13,7 +13,13 @@
       "Bash(dos2unix:*)",
       "Bash(sed:*)",
       "Bash(cd:*)",
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Bash(cd:*)",
+      "Bash(cd:*)",
+      "Bash(cd:*)",
+      "Bash(cd:*)",
+      "Bash(cd:*)",
+      "Bash(md5sum:*)"
     ],
     "deny": []
   }

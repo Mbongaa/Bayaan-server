@@ -38,7 +38,7 @@ class Translator:
     
     # Class-level configuration from config module
     use_context = config.translation.use_context
-    default_max_context_pairs = config.translation.max_context_pairs
+    max_context_pairs = config.translation.max_context_pairs
     
     def __init__(self, room: rtc.Room, lang: Enum, tenant_context: Optional[Dict[str, Any]] = None, broadcast_callback: Optional[Callable] = None):
         """
@@ -59,9 +59,6 @@ class Translator:
         # Initialize system prompt as None - will be built dynamically
         self.system_prompt = None
         self._prompt_template = None
-        
-        # Get context window size from room config or use default
-        self.max_context_pairs = config.translation.get_context_window_size(tenant_context)
         
         # Use deque for automatic sliding window (old messages auto-removed)
         if self.use_context:
@@ -165,18 +162,15 @@ class Translator:
                 {"name": "Arabic"}
             )["name"]
             
-            # Get target language name from the enum value
-            target_lang_name = self.lang.name  # This should give us "Dutch" instead of "nl"
-            
             # Build the prompt using prompt builder
             self.system_prompt = await prompt_builder.get_prompt_for_room(
                 room_id=room_id,
                 source_lang=source_lang_name,
-                target_lang=target_lang_name,
+                target_lang=self.lang.value,
                 room_config=self.tenant_context
             )
             
-            logger.info(f"📝 Initialized translation prompt for room {room_id}: {source_lang_name} → {target_lang_name} (code: {self.lang.value})")
+            logger.info(f"📝 Initialized translation prompt for room {room_id}: {source_lang_name} → {self.lang.value}")
             self._prompt_initialized = True
             
         except Exception as e:

@@ -88,14 +88,6 @@ class TranslationConfig:
         if room_config and 'transcription_language' in room_config and room_config['transcription_language']:
             return room_config['transcription_language']
         return self.default_source_language
-    
-    def get_context_window_size(self, room_config: Optional[Dict[str, any]] = None) -> int:
-        """Get context window size from room config or use default."""
-        if room_config and 'context_window_size' in room_config and room_config['context_window_size']:
-            # Ensure the value is within valid range (3-20)
-            size = int(room_config['context_window_size'])
-            return max(3, min(20, size))
-        return self.max_context_pairs
 
 
 @dataclass
@@ -103,7 +95,7 @@ class SpeechmaticsConfig:
     """Speechmatics STT configuration."""
     language: str = "ar"
     operating_point: str = "enhanced"
-    enable_partials: bool = False  # Disabled to reduce API costs - frontend doesn't use partials
+    enable_partials: bool = True
     max_delay: float = 2.0
     punctuation_sensitivity: float = 0.5
     diarization: str = "speaker"
@@ -161,7 +153,7 @@ class ApplicationConfig:
         print(f"   SERVICE_KEY: {'✅ SET' if self.supabase.service_role_key else '❌ NOT SET'}")
         print(f"   Default Languages: {self.translation.default_source_language} → {self.translation.default_target_language}")
         print(f"   Context Window: {'✅ ENABLED' if self.translation.use_context else '❌ DISABLED'} ({self.translation.max_context_pairs} pairs)")
-        print(f"   STT Defaults: delay={self.speechmatics.max_delay}s, punctuation={self.speechmatics.punctuation_sensitivity}, partials={'✅' if self.speechmatics.enable_partials else '❌'}")
+        print(f"   STT Defaults: delay={self.speechmatics.max_delay}s, punctuation={self.speechmatics.punctuation_sensitivity}")
 
 
 # Global configuration instance
