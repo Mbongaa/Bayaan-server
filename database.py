@@ -152,7 +152,8 @@ async def store_transcript_in_database(
     message_type: str, 
     language: str, 
     text: str, 
-    tenant_context: Dict[str, Any]
+    tenant_context: Dict[str, Any],
+    sentence_context: Optional[Dict[str, Any]] = None
 ) -> bool:
     """
     Store transcription/translation in Supabase database.
@@ -162,6 +163,7 @@ async def store_transcript_in_database(
         language: Language code (e.g., "ar", "nl")
         text: The text to store
         tenant_context: Context containing room_id, mosque_id, session_id
+        sentence_context: Optional context containing sentence_id, is_complete, is_fragment
         
     Returns:
         bool: True if successful, False otherwise
@@ -194,6 +196,12 @@ async def store_transcript_in_database(
             "session_id": session_id,
             "timestamp": datetime.utcnow().isoformat() + "Z",
         }
+        
+        # Add sentence context if provided
+        if sentence_context:
+            transcript_data["sentence_id"] = sentence_context.get("sentence_id")
+            transcript_data["is_complete"] = sentence_context.get("is_complete", False)
+            transcript_data["is_fragment"] = sentence_context.get("is_fragment", True)
         
         # Set appropriate field based on message type
         if message_type == "transcription":
@@ -415,6 +423,98 @@ async def query_prompt_template_for_room(room_id: int) -> Optional[Dict[str, Any
     except Exception as e:
         logger.error(f"❌ Prompt template query failed: {e}")
         return None
+
+
+async def update_session_heartbeat(session_id: str) -> bool:
+    """
+    Update the last_active timestamp for a session to prevent it from being cleaned up.
+    
+    Args:
+        session_id: The session ID to update
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    if not session_id:
+        return False
+        
+    try:
+        session = await _pool.get_session()
+        async with get_db_headers() as headers:
+            # Update the last_active timestamp
+            url = f"{config.supabase.url}/rest/v1/room_sessions"
+            params = {"id": f"eq.{session_id}"}
+            data = {"last_active": datetime.utcnow().isoformat()}
+            
+            timeout = aiohttp.ClientTimeout(total=config.supabase.http_timeout)
+            
+            try:
+                async with session.patch(url, headers=headers, params=params, json=data, timeout=timeout) as response:
+                    if response.status in [200, 204]:
+                        logger.debug(f"💓 Session heartbeat updated for {session_id}")
+                        return True
+                    else:
+                        error_text = await response.text()
+                        logger.warning(f"Failed to update session heartbeat: {response.status} - {error_text}")
+                        return False
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout updating session heartbeat {session_id}")
+                return False
+            except Exception as e:
+                logger.error(f"Error updating session heartbeat {session_id}: {e}")
+                return False
+                
+    except Exception as e:
+        logger.error(f"❌ Failed to update session heartbeat {session_id}: {e}")
+        return False
+
+
+async def close_room_session(session_id: str) -> bool:
+    """
+    Close a room session by marking it as completed in the database.
+    
+    Args:
+        session_id: The session ID to close
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    if not session_id:
+        logger.warning("No session_id provided to close_room_session")
+        return False
+        
+    try:
+        session = await _pool.get_session()
+        async with get_db_headers() as headers:
+            # Call the cleanup_session_idempotent function
+            url = f"{config.supabase.url}/rest/v1/rpc/cleanup_session_idempotent"
+            data = {
+                "p_session_id": session_id,
+                "p_source": "agent_disconnect"
+            }
+            
+            timeout = aiohttp.ClientTimeout(total=config.supabase.http_timeout)
+            
+            try:
+                async with session.post(url, headers=headers, json=data, timeout=timeout) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        logger.info(f"✅ Session {session_id} closed successfully")
+                        return True
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"Failed to close session: {response.status} - {error_text}")
+                        return False
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout closing session {session_id}")
+                return False
+            except Exception as e:
+                logger.error(f"Error closing session {session_id}: {e}")
+                return False
+                
+    except Exception as e:
+        logger.error(f"❌ Failed to close session {session_id}: {e}")
+        return False
 
 
 async def close_database_connections():

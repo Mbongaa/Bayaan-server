@@ -107,7 +107,7 @@ async def broadcast_to_displays(
             # Store directly in database using existing function
             # Use create_task to avoid blocking the broadcast with proper error handling
             task = asyncio.create_task(
-                _store_with_error_handling(message_type, language, text, tenant_context)
+                _store_with_error_handling(message_type, language, text, tenant_context, sentence_context)
             )
             task.add_done_callback(lambda t: None if not t.exception() else logger.error(f"Storage task failed: {t.exception()}"))
             logger.debug(
@@ -126,7 +126,8 @@ async def _store_with_error_handling(
     message_type: str, 
     language: str, 
     text: str, 
-    tenant_context: Dict[str, Any]
+    tenant_context: Dict[str, Any],
+    sentence_context: Optional[Dict[str, Any]] = None
 ) -> None:
     """
     Store transcript with proper error handling.
@@ -139,10 +140,11 @@ async def _store_with_error_handling(
         language: Language code
         text: The text content to store
         tenant_context: Context containing room_id, mosque_id, etc.
+        sentence_context: Optional context containing sentence_id, is_complete, is_fragment
     """
     try:
         success = await store_transcript_in_database(
-            message_type, language, text, tenant_context
+            message_type, language, text, tenant_context, sentence_context
         )
         if not success:
             logger.warning(
