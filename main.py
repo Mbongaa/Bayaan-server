@@ -141,6 +141,7 @@ async def entrypoint(job: JobContext):
                             "room_title": room_data.get("Title"),
                             "transcription_language": room_data.get("transcription_language", "ar"),
                             "translation_language": room_data.get("translation__language", "nl"),
+                            "context_window_size": room_data.get("context_window_size", 6),
                             "created_at": room_data.get("created_at")
                         }
                         # Also store the double underscore version for compatibility
@@ -224,7 +225,8 @@ async def entrypoint(job: JobContext):
                   f"lang={room_config.get('transcription_language', 'ar')}, "
                   f"target={room_config.get('translation_language', 'nl')}, "
                   f"delay={room_config.get('max_delay', 2.0)}, "
-                  f"punct={room_config.get('punctuation_sensitivity', 0.5)}")
+                  f"punct={room_config.get('punctuation_sensitivity', 0.5)}, "
+                  f"context_window={room_config.get('context_window_size', 6)}")
         
         # If we need full room data and it's not in context, query it
         if not room_config.get('max_delay'):
@@ -235,9 +237,10 @@ async def entrypoint(job: JobContext):
                     room_config.update({
                         'max_delay': full_room_data.get('max_delay'),
                         'punctuation_sensitivity': full_room_data.get('punctuation_sensitivity'),
-                        'translation__language': full_room_data.get('translation__language')
+                        'translation__language': full_room_data.get('translation__language'),
+                        'context_window_size': full_room_data.get('context_window_size', 6)
                     })
-                    logger.info(f"📋 Fetched additional room config: delay={room_config.get('max_delay')}, punct={room_config.get('punctuation_sensitivity')}")
+                    logger.info(f"📋 Fetched additional room config: delay={room_config.get('max_delay')}, punct={room_config.get('punctuation_sensitivity')}, context_window={room_config.get('context_window_size')}")
             except Exception as e:
                 logger.warning(f"Failed to fetch additional room config: {e}")
     
