@@ -1,0 +1,45 @@
+services:
+  - type: worker
+    name: bayaan-livekit-agent
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    region: oregon
+    scaling:
+      minInstances: 1
+      maxInstances: 3
+      targetMemoryPercent: 80
+      targetCPUPercent: 80
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: LIVEKIT_URL
+        fromSecret: livekit_url
+      - key: LIVEKIT_API_KEY
+        fromSecret: livekit_api_key
+      - key: LIVEKIT_API_SECRET
+        fromSecret: livekit_api_secret
+      - key: OPENAI_API_KEY
+        fromSecret: openai_api_key
+      - key: SPEECHMATICS_API_KEY
+        fromSecret: speechmatics_api_key
+      - key: SUPABASE_URL
+        fromSecret: supabase_url
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        fromSecret: supabase_service_role_key
+      - key: SUPABASE_ANON_KEY
+        fromSecret: supabase_anon_key
+      - key: PYTHONPATH
+        value: /app
+      - key: AGENT_NAME
+        value: bayaan-transcriber
+      - key: WORKER_TYPE
+        value: background
+      - key: LOG_LEVEL
+        value: INFO
+      - key: PERSISTENT_MODE
+        value: "true"
+      - key: MAX_WORKERS
+        value: "3"
+      - key: IDLE_TIMEOUT
+        value: "300" 

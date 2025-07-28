@@ -12,10 +12,6 @@ from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass, asdict
 
-# Apply domain support patch BEFORE importing speechmatics
-from speechmatics_domain_patch import patch_speechmatics_for_domain_support
-patch_speechmatics_for_domain_support()
-
 from livekit import rtc
 from livekit.agents import (
     AutoSubscribe,
@@ -41,8 +37,8 @@ from database import (
     get_active_session_for_room,
     broadcast_to_channel,
     close_database_connections,
-    close_room_session,
-    update_session_heartbeat
+    get_health_monitor,
+    update_session_heartbeat_with_monitor
 )
 
 # Import text processing and translation helpers
@@ -110,37 +106,15 @@ async def entrypoint(job: JobContext):
     # Initialize resource manager
     resource_manager = ResourceManager()
     
+    # Initialize health monitor
+    health_monitor = get_health_monitor()
+    
     # Register heartbeat timeout callback
     async def on_participant_timeout(participant_id: str):
         logger.warning(f"💔 Participant {participant_id} timed out - initiating cleanup")
         # Could trigger cleanup here if needed
     
     resource_manager.heartbeat_monitor.register_callback(on_participant_timeout)
-    
-    # Start periodic session heartbeat task
-    heartbeat_task = None
-    async def update_session_heartbeat_periodic():
-        """Periodically update the session heartbeat in the database."""
-        while True:
-            try:
-                await asyncio.sleep(20)  # Update every 20 seconds
-                
-                session_id = tenant_context.get('session_id')
-                if session_id:
-                    success = await update_session_heartbeat(session_id)
-                    if success:
-                        logger.debug(f"💓 Updated database session heartbeat for {session_id}")
-                    else:
-                        logger.warning(f"⚠️ Failed to update session heartbeat for {session_id}")
-                else:
-                    logger.debug("No session_id available for heartbeat update")
-                    
-            except asyncio.CancelledError:
-                logger.info("💔 Session heartbeat task cancelled")
-                break
-            except Exception as e:
-                logger.error(f"❌ Error in session heartbeat task: {e}")
-                await asyncio.sleep(5)  # Wait before retrying
     
     # Extract tenant context from room metadata or webhook handler
     tenant_context = {}
@@ -273,26 +247,16 @@ async def entrypoint(job: JobContext):
     # Create STT configuration with room-specific overrides
     stt_config = config.speechmatics.with_room_settings(room_config)
     
-    # Get domain from room config (default to 'broadcast' for sermons)
-    domain = room_config.get('speechmatics_domain', 'broadcast') if room_config else 'broadcast'
-    logger.info(f"[INFO] Speechmatics domain configured: {domain}")
-    
-    # Build TranscriptionConfig parameters with domain support
-    transcription_params = {
-        "language": stt_config.language,
-        "operating_point": stt_config.operating_point,
-        "enable_partials": stt_config.enable_partials,
-        "max_delay": stt_config.max_delay,
-        "punctuation_overrides": {"sensitivity": stt_config.punctuation_sensitivity},
-        "diarization": stt_config.diarization,
-        "domain": domain  # Our patch makes this work!
-    }
-    
-    logger.info(f"📋 Creating TranscriptionConfig with domain: {domain}")
-    
     # Initialize STT provider with configured settings
     stt_provider = speechmatics.STT(
-        transcription_config=TranscriptionConfig(**transcription_params)
+        transcription_config=TranscriptionConfig(
+            language=stt_config.language,
+            operating_point=stt_config.operating_point,
+            enable_partials=stt_config.enable_partials,
+            max_delay=stt_config.max_delay,
+            punctuation_overrides={"sensitivity": stt_config.punctuation_sensitivity},
+            diarization=stt_config.diarization
+        )
     )
     
     # Update source language based on room config
@@ -322,9 +286,6 @@ async def entrypoint(job: JobContext):
     last_final_transcript = ""  # Keep track of the last final transcript to avoid duplicates
     current_sentence_id = None  # Track current sentence being built
     
-    # Track participant tasks for cleanup
-    participant_tasks = {}  # participant_id -> task
-    
     logger.info(f"🚀 Starting entrypoint for room: {job.room.name if job.room else 'unknown'}")
     logger.info(f"🔍 Translators dict ID: {id(translators)}")
     logger.info(f"🎯 Configuration: {languages[source_language].name} → {languages.get(target_language, languages['nl']).name}")
@@ -339,8 +300,31 @@ async def entrypoint(job: JobContext):
         
         try:
             async for ev in stt_stream:
-                # Only process final transcripts since partials are disabled
-                if ev.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
+                # Log to console for interim (word-by-word)
+                if ev.type == stt.SpeechEventType.INTERIM_TRANSCRIPT:
+                    print(ev.alternatives[0].text, end="", flush=True)
+                    
+                    # Publish interim transcription for real-time word-by-word display
+                    interim_text = ev.alternatives[0].text.strip()
+                    if interim_text:
+                        try:
+                            interim_segment = rtc.TranscriptionSegment(
+                                id=utils.misc.shortuuid("SG_"),
+                                text=interim_text,
+                                start_time=0,
+                                end_time=0,
+                                language=source_language,  # Arabic
+                                final=False,  # This is interim, not final
+                            )
+                            interim_transcription = rtc.Transcription(
+                                job.room.local_participant.identity, "", [interim_segment]
+                            )
+                            await job.room.local_participant.publish_transcription(interim_transcription)
+                        except Exception as e:
+                            logger.debug(f"Failed to publish interim transcription: {str(e)}")
+                    
+                elif ev.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
+                    print("\n")
                     final_text = ev.alternatives[0].text.strip()
                     print(" -> ", final_text)
                     logger.info(f"Final Arabic transcript: {final_text}")
@@ -485,22 +469,18 @@ async def entrypoint(job: JobContext):
                 )
                 
                 frame_count = 0
-                try:
-                    async for ev in audio_stream:
-                        frame_count += 1
-                        if frame_count % 100 == 0:  # Log every 100 frames to avoid spam
-                            logger.debug(f"🔊 Received audio frame #{frame_count} from {participant.identity}")
-                            # Update heartbeat every 100 frames
-                            await resource_manager.heartbeat_monitor.update_heartbeat(
-                                participant.identity, 
-                                tenant_context.get('session_id')
-                            )
-                        stt_stream.push_frame(ev.frame)
-                except asyncio.CancelledError:
-                    logger.debug(f"Audio stream cancelled for {participant.identity}")
-                    raise
-                finally:
-                    logger.warning(f"🔇 Audio stream ended for {participant.identity}")
+                async for ev in audio_stream:
+                    frame_count += 1
+                    if frame_count % 100 == 0:  # Log every 100 frames to avoid spam
+                        logger.debug(f"🔊 Received audio frame #{frame_count} from {participant.identity}")
+                        # Update heartbeat every 100 frames
+                        await resource_manager.heartbeat_monitor.update_heartbeat(
+                            participant.identity, 
+                            tenant_context.get('session_id')
+                        )
+                    stt_stream.push_frame(ev.frame)
+                    
+                logger.warning(f"🔇 Audio stream ended for {participant.identity}")
                 
                 # Cancel the transcription task if still running
                 if not stt_task.done():
@@ -525,13 +505,11 @@ async def entrypoint(job: JobContext):
         logger.info(f"Track details - muted: {publication.muted}")
         if track.kind == rtc.TrackKind.KIND_AUDIO:
             logger.info(f"✅ Adding Arabic transcriber for participant: {participant.identity}")
-            task = resource_manager.task_manager.create_task(
+            resource_manager.task_manager.create_task(
                 transcribe_track(participant, track),
                 name=f"track-handler-{participant.identity}",
                 metadata={"participant": participant.identity, "track": track.sid}
             )
-            # Store task reference for cleanup
-            participant_tasks[participant.identity] = task
         else:
             logger.info(f"❌ Ignoring non-audio track: {track.kind}")
 
@@ -565,29 +543,12 @@ async def entrypoint(job: JobContext):
                     # Update all translators with new context
                     for translator in translators.values():
                         translator.tenant_context = tenant_context
-                        
-                    # If we got a new session_id and don't have heartbeat task, start it
-                    if participant_metadata.get("session_id") and not heartbeat_task:
-                        heartbeat_task = resource_manager.task_manager.create_task(
-                            update_session_heartbeat_periodic(),
-                            name="session-heartbeat",
-                            metadata={"session_id": participant_metadata.get("session_id")}
-                        )
-                        logger.info(f"💓 Started session heartbeat task for new session {participant_metadata.get('session_id')}")
             except Exception as e:
                 logger.debug(f"Could not parse participant metadata: {e}")
 
     @job.room.on("participant_disconnected")
     def on_participant_disconnected(participant: rtc.RemoteParticipant):
         logger.info(f"👥 Participant disconnected: {participant.identity}")
-        
-        # Cancel participant's transcription task if it exists
-        if participant.identity in participant_tasks:
-            task = participant_tasks[participant.identity]
-            if not task.done():
-                logger.info(f"🚫 Cancelling transcription task for {participant.identity}")
-                task.cancel()
-            del participant_tasks[participant.identity]
         
         # Remove from heartbeat monitoring
         resource_manager.heartbeat_monitor.remove_participant(participant.identity)
@@ -656,15 +617,6 @@ async def entrypoint(job: JobContext):
     await job.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
     logger.info(f"Successfully connected to room: {job.room.name}")
     logger.info(f"📡 Real-time transcription data will be sent via Supabase Broadcast")
-    
-    # Start the heartbeat task after connection
-    if tenant_context.get('session_id'):
-        heartbeat_task = resource_manager.task_manager.create_task(
-            update_session_heartbeat_periodic(),
-            name="session-heartbeat",
-            metadata={"session_id": tenant_context.get('session_id')}
-        )
-        logger.info(f"💓 Started session heartbeat task for session {tenant_context.get('session_id')}")
     
     # Debug room state after connection
     logger.info(f"Room participants: {len(job.room.remote_participants)}")
@@ -748,45 +700,17 @@ async def entrypoint(job: JobContext):
             # Log final resource statistics
             resource_manager.log_stats()
             
-            # Cancel heartbeat task first if it exists
-            if heartbeat_task and not heartbeat_task.done():
-                heartbeat_task.cancel()
-                try:
-                    await heartbeat_task
-                except asyncio.CancelledError:
-                    logger.debug("Heartbeat task cancelled")
-            
             # Shutdown resource manager (cancels all tasks, closes all streams)
             await resource_manager.shutdown()
-            
-            # Close the room session in database if we have a session_id
-            try:
-                session_id = tenant_context.get('session_id') if tenant_context else None
-                if session_id:
-                    logger.info(f"🔒 Closing database session: {session_id}")
-                    await close_room_session(session_id)
-                else:
-                    logger.warning("⚠️ No session_id found to close")
-            except Exception as e:
-                logger.error(f"Failed to close room session: {e}")
             
             # Close database connections
             try:
                 await close_database_connections()
                 logger.info("✅ Database connections closed")
                 
-                # Force cleanup of any remaining aiohttp sessions
+                # Force cleanup of any remaining sessions
                 import gc
-                import aiohttp
-                
-                # Find and close any unclosed ClientSessions
-                for obj in gc.get_objects():
-                    if isinstance(obj, aiohttp.ClientSession) and not obj.closed:
-                        logger.warning(f"⚠️ Found unclosed ClientSession, closing it: {obj}")
-                        await obj.close()
-                
-                # Force garbage collection
-                gc.collect()
+                gc.collect()  # Force garbage collection
                 await asyncio.sleep(0.1)  # Give time for cleanup
             except Exception as e:
                 logger.debug(f"Database cleanup error: {e}")

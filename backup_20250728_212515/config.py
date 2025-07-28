@@ -53,7 +53,7 @@ class TranslationConfig:
     
     # Context window settings
     use_context: bool = True
-    max_context_pairs: int = 12  # Increased from 6 for better accuracy in sermons/lectures
+    max_context_pairs: int = 6  # Number of translation pairs to keep in memory
     
     # Timing settings
     translation_delay: float = 10.0  # Delay before translating incomplete sentences
@@ -104,8 +104,8 @@ class SpeechmaticsConfig:
     language: str = "ar"
     operating_point: str = "enhanced"
     enable_partials: bool = False  # Disabled to reduce API costs - frontend doesn't use partials
-    max_delay: float = 3.5  # Increased from 2.0 for better context and accuracy
-    punctuation_sensitivity: float = 0.5  # Default punctuation sensitivity
+    max_delay: float = 2.0
+    punctuation_sensitivity: float = 0.5
     diarization: str = "speaker"
     
     def with_room_settings(self, room_config: Optional[Dict[str, any]] = None) -> 'SpeechmaticsConfig':
