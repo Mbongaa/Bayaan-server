@@ -36,9 +36,7 @@ from database import (
     query_room_by_name,
     get_active_session_for_room,
     broadcast_to_channel,
-    close_database_connections,
-    get_health_monitor,
-    update_session_heartbeat_with_monitor
+    close_database_connections
 )
 
 # Import text processing and translation helpers
@@ -105,9 +103,6 @@ async def entrypoint(job: JobContext):
     
     # Initialize resource manager
     resource_manager = ResourceManager()
-    
-    # Initialize health monitor
-    health_monitor = get_health_monitor()
     
     # Register heartbeat timeout callback
     async def on_participant_timeout(participant_id: str):

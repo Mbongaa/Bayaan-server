@@ -1,0 +1,56 @@
+# Add these imports at the top of database.py after existing imports:
+from database_enhanced import (
+    ensure_active_session_atomic as _ensure_active_session_atomic,
+    SessionHealthMonitor,
+    update_session_heartbeat_enhanced
+)
+
+# Initialize health monitor (add after _pool initialization)
+_health_monitor = SessionHealthMonitor()
+
+# Replace the existing ensure_active_session function with:
+async def ensure_active_session(room_id: int, mosque_id: int) -> Optional[str]:
+    """
+    Enhanced version with atomic session creation and ghost prevention.
+    """
+    try:
+        session = await _pool.get_session()
+        async with get_db_headers() as headers:
+            return await _ensure_active_session_atomic(
+                room_id, mosque_id, session, headers
+            )
+    except Exception as e:
+        logger.error(f"Failed to ensure active session: {e}")
+        return None
+
+# Add this new function for enhanced heartbeat:
+async def update_session_heartbeat_with_monitor(session_id: str) -> bool:
+    """
+    Update heartbeat with health monitoring.
+    """
+    if not session_id:
+        return False
+        
+    try:
+        session = await _pool.get_session()
+        async with get_db_headers() as headers:
+            # Use health monitor
+            healthy = await _health_monitor.monitor_heartbeat(
+                session_id, session, headers
+            )
+            
+            if not healthy:
+                if _health_monitor.should_force_cleanup(session_id):
+                    logger.error(f"Session {session_id} needs force cleanup")
+                    return False
+                else:
+                    _health_monitor.increment_recovery_attempt(session_id)
+                    
+            return healthy
+    except Exception as e:
+        logger.error(f"Heartbeat monitor error: {e}")
+        return False
+
+# Export health monitor for use in main.py
+def get_health_monitor():
+    return _health_monitor
