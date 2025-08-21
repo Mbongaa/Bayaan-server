@@ -1,8 +1,9 @@
-# LiveKit Core Dependencies - PINNED TO WORKING VERSIONS
+# LiveKit Core Dependencies - EXACT VERSIONS FROM JULY 28 DEPLOYMENT
+livekit==1.0.12
 livekit-agents==1.2.1
-livekit-plugins-openai==0.8.1
-livekit-plugins-speechmatics==0.6.1
-livekit-plugins-silero==0.6.1
+livekit-plugins-openai==1.2.1
+livekit-plugins-speechmatics==1.2.1
+livekit-plugins-silero==1.2.1
 
 # AI/ML Dependencies
 openai>=1.0.0
