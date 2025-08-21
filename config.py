@@ -71,6 +71,7 @@ class TranslationConfig:
                 "de": {"name": "German", "flag": "🇩🇪"},
                 "ja": {"name": "Japanese", "flag": "🇯🇵"},
                 "nl": {"name": "Dutch", "flag": "🇳🇱"},
+                "tr": {"name": "Turkish", "flag": "🇹🇷"},
             }
     
     def get_target_language(self, room_config: Optional[Dict[str, any]] = None) -> str:
