@@ -180,16 +180,14 @@ class SpeechmaticsConfig:
 @dataclass
 class ApplicationConfig:
     """Main application configuration."""
-    # Component configurations
+    # Component configurations (non-default fields first)
     supabase: SupabaseConfig  # Mosque database
-    classroom_supabase: Optional[SupabaseConfig] = None  # Classroom database (optional)
     translation: TranslationConfig
     speechmatics: SpeechmaticsConfig
 
-    # Logging
+    # Optional/default fields (must come after non-default fields)
+    classroom_supabase: Optional[SupabaseConfig] = None  # Classroom database (optional)
     log_level: str = "INFO"
-
-    # Testing/Development
     default_mosque_id: int = 1
     test_mosque_id: int = 546012  # Hardcoded test mosque
     test_room_id: int = 192577    # Hardcoded test room
@@ -215,9 +213,9 @@ class ApplicationConfig:
 
         return cls(
             supabase=mosque_supabase,
-            classroom_supabase=classroom_supabase,
             translation=TranslationConfig(),
-            speechmatics=SpeechmaticsConfig()
+            speechmatics=SpeechmaticsConfig(),
+            classroom_supabase=classroom_supabase
         )
     
     def validate(self) -> None:
