@@ -153,41 +153,59 @@ class Translator:
         """Initialize the system prompt using the prompt builder."""
         if self._prompt_initialized:
             return
-            
+
         try:
             # Get room ID from tenant context
             room_id = self.tenant_context.get('room_id')
-            
+
             # Get source language from room config
             source_lang_code = self.tenant_context.get('transcription_language', 'ar')
             source_lang_name = config.translation.supported_languages.get(
-                source_lang_code, 
+                source_lang_code,
                 {"name": "Arabic"}
             )["name"]
-            
+
             # Get target language name from the enum value
             target_lang_name = self.lang.name  # This should give us "Dutch" instead of "nl"
-            
-            # Build the prompt using prompt builder
+
+            # PRIORITY 1: Direct prompt from database (classroom database flow)
+            direct_prompt = self.tenant_context.get('translation_prompt')
+            if direct_prompt:
+                try:
+                    # Format prompt with language variables
+                    self.system_prompt = direct_prompt.format(
+                        source_lang=source_lang_name,
+                        source_language=source_lang_name,
+                        target_lang=target_lang_name,
+                        target_language=target_lang_name
+                    )
+                    logger.info(f"✅ Using direct prompt from database: {source_lang_name} → {target_lang_name}")
+                    logger.info(f"📝 Direct prompt: {self.system_prompt[:100]}...")
+                    self._prompt_initialized = True
+                    return
+                except KeyError as e:
+                    logger.warning(f"Direct prompt missing variable {e}, falling back to prompt builder")
+
+            # PRIORITY 2: Build the prompt using prompt builder (mosque flow + fallbacks)
             self.system_prompt = await prompt_builder.get_prompt_for_room(
                 room_id=room_id,
                 source_lang=source_lang_name,
                 target_lang=target_lang_name,
                 room_config=self.tenant_context
             )
-            
+
             logger.info(f"📝 Initialized translation prompt for room {room_id}: {source_lang_name} → {target_lang_name} (code: {self.lang.value})")
             self._prompt_initialized = True
-            
+
         except Exception as e:
             logger.error(f"Failed to initialize prompt: {e}")
             # Fallback to default prompt with dynamic source language
             source_lang_code = self.tenant_context.get('transcription_language', 'ar')
             source_lang_name = config.translation.supported_languages.get(
-                source_lang_code, 
+                source_lang_code,
                 {"name": "Arabic"}
             )["name"]
-            
+
             self.system_prompt = (
                 f"You are an expert simultaneous interpreter. Your task is to translate from {source_lang_name} to {self.lang.value}. "
                 f"Provide a direct and accurate translation of the user's input. Be concise and use natural-sounding language. "

@@ -273,9 +273,88 @@ async def query_room_by_name(room_name: str) -> Optional[Dict[str, Any]]:
                 logger.error(f"Error querying room: {e}")
         
         return None
-        
+
     except Exception as e:
         logger.error(f"❌ Room query failed: {e}")
+        return None
+
+
+async def query_classroom_by_id(classroom_uuid: str, classroom_config) -> Optional[Dict[str, Any]]:
+    """
+    Query classroom information by UUID (which is used as LiveKit room name).
+    Calls the get_classroom_translation_prompt RPC function to get prompt via JOIN.
+
+    Args:
+        classroom_uuid: The classroom UUID (same as LiveKit room name)
+        classroom_config: Classroom database SupabaseConfig
+
+    Returns:
+        Room data dictionary in Bayaan-compatible format, or None if not found
+    """
+    try:
+        session = await _pool.get_session()
+
+        # Build headers for classroom database
+        headers = {
+            'apikey': classroom_config.service_role_key,
+            'Authorization': f'Bearer {classroom_config.service_role_key}',
+            'Content-Type': 'application/json'
+        }
+
+        # Use RPC function to get classroom with prompt (via JOIN)
+        url = f"{classroom_config.url}/rest/v1/rpc/get_classroom_translation_prompt"
+        data = {"classroom_uuid": classroom_uuid}
+
+        timeout = aiohttp.ClientTimeout(total=classroom_config.http_timeout)
+
+        try:
+            async with session.post(url, headers=headers, json=data, timeout=timeout) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    if result and len(result) > 0:
+                        classroom_data = result[0]
+
+                        # Adapt classroom structure to Bayaan's expected format
+                        adapted_data = {
+                            # Use UUID as room_id (Bayaan treats it as identifier)
+                            "id": classroom_uuid,
+                            "mosque_id": None,  # Classrooms don't have mosque_id
+                            "Title": "Classroom",  # Generic title
+
+                            # Translation settings from classroom
+                            "transcription_language": classroom_data.get('transcription_language', 'ar'),
+                            "translation__language": None,  # Not used for classrooms
+                            "context_window_size": classroom_data.get('context_window_size', 12),
+
+                            # Direct prompt from JOIN
+                            "translation_prompt": classroom_data.get('prompt_text'),
+
+                            "created_at": None,
+                        }
+
+                        logger.info(f"✅ Found classroom in classroom database: id={classroom_uuid}")
+                        logger.info(f"🎓 Classroom translation config: transcription={adapted_data.get('transcription_language')}, context_window={adapted_data.get('context_window_size')}")
+
+                        if adapted_data.get('translation_prompt'):
+                            logger.info(f"📝 Classroom has custom prompt: {adapted_data['translation_prompt'][:80]}...")
+                        else:
+                            logger.info(f"📝 Classroom has no custom prompt (will use default)")
+
+                        return adapted_data
+                    else:
+                        logger.debug(f"Classroom UUID {classroom_uuid} not found in classroom database")
+                else:
+                    error_text = await response.text()
+                    logger.debug(f"Classroom query failed: {response.status} - {error_text}")
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout querying classroom database for {classroom_uuid}")
+        except Exception as e:
+            logger.warning(f"Error querying classroom database: {e}")
+
+        return None
+
+    except Exception as e:
+        logger.error(f"❌ Classroom query failed for {classroom_uuid}: {e}")
         return None
 
 

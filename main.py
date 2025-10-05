@@ -38,6 +38,7 @@ from database import (
     ensure_active_session,
     store_transcript_in_database,
     query_room_by_name,
+    query_classroom_by_id,
     get_active_session_for_room,
     broadcast_to_channel,
     close_database_connections,
@@ -159,7 +160,15 @@ async def entrypoint(job: JobContext):
                     logger.info(f"🔍 Querying database for room: {job.room.name}")
                     # Query room directly without task wrapper
                     room_data = await query_room_by_name(job.room.name)
-                    
+
+                    # NEW: If not found in mosque DB, try classroom DB
+                    if not room_data and config.classroom_supabase:
+                        logger.info("🔍 Room not found in mosque DB, trying classroom DB...")
+                        room_data = await query_classroom_by_id(job.room.name, config.classroom_supabase)
+
+                        if room_data:
+                            logger.info("🎓 Using classroom database configuration")
+
                     if room_data:
                         tenant_context = {
                             "room_id": room_data.get("id"),
@@ -168,20 +177,26 @@ async def entrypoint(job: JobContext):
                             "transcription_language": room_data.get("transcription_language", "ar"),
                             "translation_language": room_data.get("translation__language", "nl"),
                             "context_window_size": room_data.get("context_window_size", 6),
-                            "created_at": room_data.get("created_at")
+                            "created_at": room_data.get("created_at"),
+                            "translation_prompt": room_data.get("translation_prompt")  # NEW: Direct prompt from DB
                         }
                         # Also store the double underscore version for compatibility
                         if room_data.get("translation__language"):
                             tenant_context["translation__language"] = room_data.get("translation__language")
-                        
+
                         logger.info(f"✅ Found room in database: room_id={tenant_context.get('room_id')}, mosque_id={tenant_context.get('mosque_id')}")
                         logger.info(f"🗣️ Languages: transcription={tenant_context.get('transcription_language')}, translation={tenant_context.get('translation_language')} (or {tenant_context.get('translation__language')})")
-                        
-                        # Try to get active session for this room
-                        session_id = await get_active_session_for_room(tenant_context['room_id'])
-                        if session_id:
-                            tenant_context["session_id"] = session_id
-                            logger.info(f"📝 Found active session: {tenant_context['session_id']}")
+
+                        # Log if custom prompt is present
+                        if tenant_context.get('translation_prompt'):
+                            logger.info(f"📝 Custom prompt configured: {tenant_context['translation_prompt'][:60]}...")
+
+                        # Try to get active session for this room (only for mosque rooms with numeric ID)
+                        if tenant_context['room_id'] and isinstance(tenant_context['room_id'], int):
+                            session_id = await get_active_session_for_room(tenant_context['room_id'])
+                            if session_id:
+                                tenant_context["session_id"] = session_id
+                                logger.info(f"📝 Found active session: {tenant_context['session_id']}")
                 except Exception as e:
                     logger.warning(f"⚠️ Could not query Supabase: {e}")
         

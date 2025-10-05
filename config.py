@@ -181,23 +181,41 @@ class SpeechmaticsConfig:
 class ApplicationConfig:
     """Main application configuration."""
     # Component configurations
-    supabase: SupabaseConfig
+    supabase: SupabaseConfig  # Mosque database
+    classroom_supabase: Optional[SupabaseConfig] = None  # Classroom database (optional)
     translation: TranslationConfig
     speechmatics: SpeechmaticsConfig
-    
+
     # Logging
     log_level: str = "INFO"
-    
+
     # Testing/Development
     default_mosque_id: int = 1
     test_mosque_id: int = 546012  # Hardcoded test mosque
     test_room_id: int = 192577    # Hardcoded test room
-    
+
     @classmethod
     def load(cls) -> 'ApplicationConfig':
         """Load complete configuration from environment and defaults."""
+        # Load mosque database (required)
+        mosque_supabase = SupabaseConfig.from_env()
+
+        # Load classroom database (optional)
+        classroom_supabase = None
+        try:
+            classroom_url = os.getenv('CLASSROOM_SUPABASE_URL')
+            classroom_key = os.getenv('CLASSROOM_SUPABASE_SERVICE_ROLE_KEY')
+            if classroom_url and classroom_key:
+                classroom_supabase = SupabaseConfig(
+                    url=classroom_url,
+                    service_role_key=classroom_key
+                )
+        except Exception as e:
+            print(f"   ⚠️ Classroom database configuration error: {e}")
+
         return cls(
-            supabase=SupabaseConfig.from_env(),
+            supabase=mosque_supabase,
+            classroom_supabase=classroom_supabase,
             translation=TranslationConfig(),
             speechmatics=SpeechmaticsConfig()
         )
@@ -206,8 +224,16 @@ class ApplicationConfig:
         """Validate configuration at startup."""
         # Print configuration status
         print("🔧 Configuration loaded:")
-        print(f"   SUPABASE_URL: {self.supabase.url[:50]}...")
-        print(f"   SERVICE_KEY: {'✅ SET' if self.supabase.service_role_key else '❌ NOT SET'}")
+        print(f"   MOSQUE SUPABASE_URL: {self.supabase.url[:50]}...")
+        print(f"   MOSQUE SERVICE_KEY: {'✅ SET' if self.supabase.service_role_key else '❌ NOT SET'}")
+
+        # Classroom database status
+        if self.classroom_supabase:
+            print(f"   CLASSROOM SUPABASE_URL: {self.classroom_supabase.url[:50]}...")
+            print(f"   CLASSROOM SERVICE_KEY: {'✅ SET' if self.classroom_supabase.service_role_key else '❌ NOT SET'}")
+        else:
+            print(f"   CLASSROOM DB: ⚠️ NOT CONFIGURED (mosque-only mode)")
+
         print(f"   Default Languages: {self.translation.default_source_language} → {self.translation.default_target_language}")
         print(f"   Context Window: {'✅ ENABLED' if self.translation.use_context else '❌ DISABLED'} ({self.translation.max_context_pairs} pairs)")
         print(f"   STT Defaults: delay={self.speechmatics.max_delay}s, punctuation={self.speechmatics.punctuation_sensitivity}, partials={'✅' if self.speechmatics.enable_partials else '❌'}")
