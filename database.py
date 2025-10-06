@@ -326,6 +326,10 @@ async def query_classroom_by_id(classroom_uuid: str, classroom_config) -> Option
                             "translation__language": None,  # Not used for classrooms
                             "context_window_size": classroom_data.get('context_window_size', 12),
 
+                            # STT settings
+                            "max_delay": classroom_data.get('max_delay'),
+                            "punctuation_sensitivity": classroom_data.get('punctuation_sensitivity'),
+
                             # Direct prompt from JOIN
                             "translation_prompt": classroom_data.get('prompt_text'),
 

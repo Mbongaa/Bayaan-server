@@ -3,21 +3,26 @@
 ## Quick Deploy (Production-Ready)
 
 ### Step 1: Use the Correct Requirements File
+
 ```bash
 # IMPORTANT: Use the pinned versions, NOT requirements.txt
 pip install -r requirements-pinned.txt
 ```
 
 ### Step 2: Deploy Your July 28 Code
+
 Use the code from commit `2ec438247866c62bc2c0d259767e9e5bd089de8f` or your backup:
+
 - Keep the domain patch imports
 - Keep the TranscriptionConfig wrapper
 - Don't change anything - it works perfectly
 
 ### Step 3: Verify Deployment
+
 After deployment, check logs for:
+
 ```
-✅ "registered worker, id=AW_..." 
+✅ "registered worker, id=AW_..."
 ✅ "received job request"
 ✅ "Accepted job request for room"
 ✅ "Speechmatics domain configured: broadcast"
@@ -26,13 +31,17 @@ After deployment, check logs for:
 ## What's Actually Happening
 
 ### Why Deployments Break
+
 When you use `requirements.txt` with `>=1.0.0`, pip installs the latest versions:
+
 - Gets LiveKit 1.2.6+ instead of 1.2.1
 - New version doesn't receive job requests with current frontend
 - Agent registers but never connects to rooms
 
 ### Why July 28 Works
+
 Your July 28 deployment has:
+
 - LiveKit 1.2.1 frozen in the container
 - Compatible job dispatch mechanism
 - Domain patch working correctly
@@ -41,6 +50,7 @@ Your July 28 deployment has:
 ## Files to Use
 
 ### requirements-pinned.txt (USE THIS)
+
 ```python
 livekit-agents==1.2.1
 livekit-plugins-openai==0.8.1
@@ -50,6 +60,7 @@ livekit-plugins-silero==0.6.1
 ```
 
 ### main.py (July 28 Version)
+
 - Keep ALL domain patch code
 - Keep TranscriptionConfig wrapper style
 - Don't remove any imports
@@ -58,7 +69,9 @@ livekit-plugins-silero==0.6.1
 ## Render/Railway Deployment
 
 ### Environment Variables
+
 No changes needed - use your existing:
+
 ```
 LIVEKIT_API_KEY=your_key
 LIVEKIT_API_SECRET=your_secret
@@ -70,11 +83,13 @@ SUPABASE_SERVICE_ROLE_KEY=your_key
 ```
 
 ### Build Command
+
 ```bash
 pip install -r requirements-pinned.txt
 ```
 
 ### Start Command
+
 ```bash
 python main.py
 ```
@@ -94,15 +109,18 @@ python main.py
 ## Troubleshooting
 
 ### If Agent Doesn't Connect
+
 1. Check you're using `requirements-pinned.txt`
 2. Verify logs show "received job request"
 3. Ensure frontend hasn't changed
 
 ### If Domain Patch Error Appears
+
 1. You're accidentally using newer LiveKit version
 2. Redeploy with `requirements-pinned.txt`
 
 ### If Transcripts Lag
+
 1. Keep the TranscriptionConfig wrapper (July 28 style)
 2. Don't use direct parameters (that's for 1.2.6+)
 

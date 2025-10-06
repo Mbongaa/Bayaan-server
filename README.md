@@ -14,6 +14,7 @@ This directory contains the production-ready version of the Bayaan LiveKit Agent
 Set the following environment variables in your Render dashboard:
 
 **Required:**
+
 - `LIVEKIT_URL` - Your LiveKit server URL (e.g., `wss://your-livekit-server.com`)
 - `LIVEKIT_API_KEY` - LiveKit API key
 - `LIVEKIT_API_SECRET` - LiveKit API secret
@@ -23,6 +24,7 @@ Set the following environment variables in your Render dashboard:
 - `SUPABASE_ANON_KEY` - Supabase anonymous key
 
 **Optional:**
+
 - `SPEECHMATICS_API_KEY` - Speechmatics API key (for enhanced STT)
 - `LOG_LEVEL` - Logging level (default: INFO)
 - `AGENT_NAME` - Agent name (default: bayaan-transcriber)
@@ -54,21 +56,25 @@ bayaan-server-production/
 ## 🔧 Production Features
 
 ### Health Checks
+
 - Built-in health check endpoint: `python main_production.py health`
 - Validates environment variables and agent status
 - Integrated with Render's health monitoring
 
 ### Graceful Shutdown
+
 - Handles SIGTERM and SIGINT signals
 - Waits for current jobs to complete (max 30 seconds)
 - Properly closes database connections
 
 ### Logging
+
 - Structured logging with configurable levels
 - JSON output for production monitoring
 - Timestamp and context information
 
 ### Error Handling
+
 - Robust error handling and recovery
 - Automatic restart on failure
 - Detailed error reporting
@@ -76,12 +82,14 @@ bayaan-server-production/
 ## 🎯 Testing Your Deployment
 
 ### 1. Verify Environment
+
 ```bash
 # Check if all required environment variables are set
 python main_production.py health
 ```
 
 ### 2. Local Testing
+
 ```bash
 # Install dependencies
 pip install -r requirements.txt
@@ -96,6 +104,7 @@ python main_production.py start
 ```
 
 ### 3. Production Verification
+
 - Check Render logs for successful startup
 - Verify agent registration in LiveKit server
 - Test with a room connection from your frontend
@@ -103,12 +112,14 @@ python main_production.py start
 ## 📊 Monitoring
 
 ### Render Dashboard
+
 - CPU and memory usage
 - Application logs
 - Health check status
 - Auto-scaling metrics
 
 ### LiveKit Server
+
 - Agent registration status
 - Room assignments
 - Connection health
@@ -116,6 +127,7 @@ python main_production.py start
 ## 🔄 Scaling
 
 The service is configured for auto-scaling:
+
 - **Minimum instances**: 1
 - **Maximum instances**: 3
 - **Scaling triggers**: CPU > 80% or Memory > 80%
@@ -155,6 +167,7 @@ python -c "from config import get_config; print(get_config())"
 ## 📞 Support
 
 For issues specific to this deployment:
+
 1. Check Render logs first
 2. Verify all environment variables
 3. Test connectivity to external services
@@ -176,4 +189,4 @@ For issues specific to this deployment:
 
 ---
 
-**Ready for production? Deploy to Render and start testing with your first subject!** 
+**Ready for production? Deploy to Render and start testing with your first subject!**
