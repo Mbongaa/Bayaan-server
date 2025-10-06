@@ -178,7 +178,9 @@ async def entrypoint(job: JobContext):
                             "translation_language": room_data.get("translation__language", "nl"),
                             "context_window_size": room_data.get("context_window_size", 6),
                             "created_at": room_data.get("created_at"),
-                            "translation_prompt": room_data.get("translation_prompt")  # NEW: Direct prompt from DB
+                            "translation_prompt": room_data.get("translation_prompt"),  # NEW: Direct prompt from DB
+                            "max_delay": room_data.get("max_delay"),
+                            "punctuation_sensitivity": room_data.get("punctuation_sensitivity")
                         }
                         # Also store the double underscore version for compatibility
                         if room_data.get("translation__language"):
