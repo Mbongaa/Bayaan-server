@@ -632,9 +632,30 @@ async def entrypoint(job: JobContext):
         changed_attributes: dict[str, str], participant: rtc.Participant
     ):
         """
-        When participant attributes change, handle new translation requests.
+        When participant attributes change, handle new translation requests
+        and source language updates.
         """
         logger.info(f"🌍 Participant {participant.identity} attributes changed: {changed_attributes}")
+
+        # Check for speaking_language changes (teacher's transcription language)
+        speaking_lang = changed_attributes.get("speaking_language", None)
+        if speaking_lang:
+            nonlocal source_language
+
+            if speaking_lang != source_language:
+                logger.info(f"🔄 Teacher changed source language: {source_language} → {speaking_lang}")
+                logger.info(f"🎤 Participant {participant.identity} (teacher) now speaking in: {languages.get(speaking_lang, {}).get('name', speaking_lang)}")
+
+                # Update the source language for future transcriptions
+                old_language = source_language
+                source_language = speaking_lang
+
+                logger.info(f"✅ Updated transcription source language from {old_language} to {source_language}")
+                logger.info(f"📝 New audio tracks will be transcribed in: {languages.get(source_language, {}).get('name', source_language)}")
+            else:
+                logger.debug(f"Speaking language unchanged: {speaking_lang}")
+
+        # Check for captions_language changes (student's translation language)
         lang = changed_attributes.get("captions_language", None)
         if lang:
             if lang == source_language:
