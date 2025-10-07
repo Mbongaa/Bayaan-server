@@ -644,14 +644,16 @@ async def entrypoint(job: JobContext):
 
             if speaking_lang != source_language:
                 logger.info(f"🔄 Teacher changed source language: {source_language} → {speaking_lang}")
-                logger.info(f"🎤 Participant {participant.identity} (teacher) now speaking in: {languages.get(speaking_lang, {}).get('name', speaking_lang)}")
+                language_name = languages[speaking_lang].name if speaking_lang in languages else speaking_lang
+                logger.info(f"🎤 Participant {participant.identity} (teacher) now speaking in: {language_name}")
 
                 # Update the source language for future transcriptions
                 old_language = source_language
                 source_language = speaking_lang
 
                 logger.info(f"✅ Updated transcription source language from {old_language} to {source_language}")
-                logger.info(f"📝 New audio tracks will be transcribed in: {languages.get(source_language, {}).get('name', source_language)}")
+                new_language_name = languages[source_language].name if source_language in languages else source_language
+                logger.info(f"📝 New audio tracks will be transcribed in: {new_language_name}")
             else:
                 logger.debug(f"Speaking language unchanged: {speaking_lang}")
 
