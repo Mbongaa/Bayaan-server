@@ -306,15 +306,31 @@ async def entrypoint(job: JobContext):
     }
     
     logger.info(f"📋 Creating TranscriptionConfig with domain: {domain}")
-    
-    # Initialize STT provider with configured settings
-    stt_provider = speechmatics.STT(
-        transcription_config=TranscriptionConfig(**transcription_params)
-    )
-    
+
+    # Initialize STT providers dictionary for multi-language support
+    stt_providers = {}  # language_code -> STT provider
+
+    # Helper function to get or create STT provider for a language
+    def get_or_create_stt_provider(language_code: str):
+        """Get existing STT provider or create new one for the specified language."""
+        if language_code not in stt_providers:
+            # Build config for this specific language
+            lang_params = transcription_params.copy()
+            lang_params["language"] = language_code
+
+            stt_providers[language_code] = speechmatics.STT(
+                transcription_config=TranscriptionConfig(**lang_params)
+            )
+            logger.info(f"🆕 Created STT provider for language: {language_code} ({languages[language_code].name if language_code in languages else language_code})")
+
+        return stt_providers[language_code]
+
     # Update source language based on room config
     source_language = config.translation.get_source_language(room_config)
     logger.info(f"🗣️ STT configured for {languages[source_language].name} speech recognition")
+
+    # Create default STT provider for database-configured language
+    default_stt_provider = get_or_create_stt_provider(source_language)
     
     translators = {}
     
@@ -486,13 +502,18 @@ async def entrypoint(job: JobContext):
             logger.error(f"STT transcription error: {str(e)}")
             raise
 
-    async def transcribe_track(participant: rtc.RemoteParticipant, track: rtc.Track):
-        logger.info(f"🎤 Starting Arabic transcription for participant {participant.identity}, track {track.sid}")
-        
+    async def transcribe_track(participant: rtc.RemoteParticipant, track: rtc.Track, stt_provider):
+        """Transcribe audio track using the provided STT provider."""
+        # Get language from provider's config
+        provider_lang = stt_provider._transcription_config.language if hasattr(stt_provider, '_transcription_config') else source_language
+        language_name = languages[provider_lang].name if provider_lang in languages else provider_lang
+
+        logger.info(f"🎤 Starting {language_name} transcription for participant {participant.identity}, track {track.sid}")
+
         try:
             audio_stream = rtc.AudioStream(track)
-            
-            # Use context manager for STT stream
+
+            # Use context manager for STT stream with provided provider
             async with resource_manager.stt_manager.create_stream(stt_provider, participant.identity) as stt_stream:
                 # Create transcription task with tracking
                 stt_task = resource_manager.task_manager.create_task(
@@ -541,11 +562,23 @@ async def entrypoint(job: JobContext):
         logger.info(f"🎵 Track subscribed: {track.kind} from {participant.identity} (track: {track.sid})")
         logger.info(f"Track details - muted: {publication.muted}")
         if track.kind == rtc.TrackKind.KIND_AUDIO:
-            logger.info(f"✅ Adding Arabic transcriber for participant: {participant.identity}")
+            # Determine transcription language from participant attributes (priority chain):
+            # 1. Participant's speaking_language attribute (teacher's UI selection)
+            # 2. source_language variable (database configuration or attribute update)
+            # 3. Default 'ar'
+            participant_lang = participant.attributes.get('speaking_language', source_language)
+            language_name = languages[participant_lang].name if participant_lang in languages else participant_lang
+
+            logger.info(f"✅ Adding {language_name} transcriber for participant: {participant.identity}")
+            logger.info(f"🔍 Language source: {'participant attribute (speaking_language)' if participant.attributes.get('speaking_language') else 'database/variable'}")
+
+            # Get appropriate STT provider for this language
+            provider = get_or_create_stt_provider(participant_lang)
+
             task = resource_manager.task_manager.create_task(
-                transcribe_track(participant, track),
+                transcribe_track(participant, track, provider),  # Pass language-specific provider
                 name=f"track-handler-{participant.identity}",
-                metadata={"participant": participant.identity, "track": track.sid}
+                metadata={"participant": participant.identity, "track": track.sid, "language": participant_lang}
             )
             # Store task reference for cleanup
             participant_tasks[participant.identity] = task
