@@ -240,16 +240,27 @@ class Translator:
         
         # Get translation from LLM with the freshly built context
         stream = self.llm.chat(chat_ctx=temp_context)
-        
+
         translated_message = ""
-        async for chunk in stream:
-            if chunk.delta is None:
-                continue
-            content = chunk.delta.content
-            if content is None:
-                break
-            translated_message += content
-        
+        try:
+            async for chunk in stream:
+                if chunk.delta is None:
+                    continue
+                content = chunk.delta.content
+                if content is None:
+                    break
+                translated_message += content
+        finally:
+            # Ensure stream is properly closed to release HTTP connections, SSL contexts,
+            # and socket buffers. Without this, each orphaned stream leaks ~50-100KB.
+            try:
+                if hasattr(stream, 'aclose'):
+                    await stream.aclose()
+                elif hasattr(stream, 'close'):
+                    await stream.close()
+            except Exception:
+                pass  # Best-effort cleanup - falls back to GC if this fails
+
         # If using context, update our history (deque will auto-remove old messages)
         if self.use_context and translated_message:
             self.message_history.append({"role": "user", "content": message})

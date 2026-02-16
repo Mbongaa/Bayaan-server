@@ -73,6 +73,11 @@ config = get_config()
 
 logger = logging.getLogger("transcriber")
 
+# Suppress verbose DEBUG logging from HTTP/OpenAI libraries to reduce memory pressure
+# These libraries generate millions of temporary string allocations that fragment memory
+for _noisy_logger in ['httpcore', 'httpx', 'openai', 'openai._base_client', 'hpack']:
+    logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
+
 
 @dataclass
 class Language:
@@ -847,20 +852,11 @@ async def entrypoint(job: JobContext):
             try:
                 await close_database_connections()
                 logger.info("✅ Database connections closed")
-                
-                # Force cleanup of any remaining aiohttp sessions
+
+                # Force garbage collection (gc.get_objects() was removed because iterating
+                # all heap objects is itself a major memory spike on cleanup)
                 import gc
-                import aiohttp
-                
-                # Find and close any unclosed ClientSessions
-                for obj in gc.get_objects():
-                    if isinstance(obj, aiohttp.ClientSession) and not obj.closed:
-                        logger.warning(f"⚠️ Found unclosed ClientSession, closing it: {obj}")
-                        await obj.close()
-                
-                # Force garbage collection
                 gc.collect()
-                await asyncio.sleep(0.1)  # Give time for cleanup
             except Exception as e:
                 logger.debug(f"Database cleanup error: {e}")
             

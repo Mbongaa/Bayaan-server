@@ -335,6 +335,23 @@ class STTStreamManager:
                     self._stats.streams_closed += 1
                     self._stats.active_streams = len(self._streams)
     
+    def prune_stale_data(self, max_age: float = 300.0):
+        """
+        Remove disconnect times and locks for participants who disconnected
+        more than max_age seconds ago. Prevents unbounded dict growth over
+        many connect/disconnect cycles.
+        """
+        now = time.time()
+        stale = [pid for pid, t in self._participant_disconnect_times.items()
+                 if now - t > max_age]
+        for pid in stale:
+            self._participant_disconnect_times.pop(pid, None)
+            # Only remove lock if participant doesn't have an active stream
+            if pid not in self._participant_streams:
+                self._cleanup_locks.pop(pid, None)
+        if stale:
+            logger.debug(f"🧹 Pruned stale data for {len(stale)} disconnected participants")
+
     def get_stats(self) -> ResourceStats:
         """Get current statistics."""
         return self._stats
@@ -491,7 +508,9 @@ class ResourceManager:
         }
     
     def log_stats(self):
-        """Log current resource statistics."""
+        """Log current resource statistics. Also prunes stale disconnect data."""
+        # Prune stale disconnect times/locks on each stats log
+        self.stt_manager.prune_stale_data()
         stats = self.get_all_stats()
         logger.info(
             f"📊 Resource Stats - "
