@@ -35,12 +35,9 @@ from config import get_config, ApplicationConfig
 
 # Import database operations
 from database import (
-    ensure_active_session,
-    store_transcript_in_database,
     query_room_by_name,
     query_classroom_by_id,
     get_active_session_for_room,
-    broadcast_to_channel,
     close_database_connections,
     close_room_session,
     update_session_heartbeat
@@ -52,9 +49,6 @@ from translation_helpers import translate_sentences
 
 # Import Translator class
 from translator import Translator
-
-# Import broadcasting function
-from broadcasting import broadcast_to_displays
 
 # Import resource management
 from resource_management import ResourceManager, TaskManager, STTStreamManager
@@ -348,12 +342,12 @@ async def entrypoint(job: JobContext):
         # Get language enum dynamically
         lang_info = languages[target_language]
         lang_enum = getattr(LanguageCode, lang_info.name)
-        translators[target_language] = Translator(job.room, lang_enum, tenant_context, broadcast_to_displays)
+        translators[target_language] = Translator(job.room, lang_enum, tenant_context)
         logger.info(f"📝 Initialized {lang_info.name} translator ({target_language})")
     else:
         logger.warning(f"⚠️ Target language '{target_language}' not supported, falling back to Dutch")
         dutch_enum = getattr(LanguageCode, 'Dutch')
-        translators["nl"] = Translator(job.room, dutch_enum, tenant_context, broadcast_to_displays)
+        translators["nl"] = Translator(job.room, dutch_enum, tenant_context)
     
     # Sentence accumulation for proper sentence-by-sentence translation
     accumulated_text = ""  # Accumulates text until we get a complete sentence
@@ -409,21 +403,6 @@ async def entrypoint(job: JobContext):
                         if not current_sentence_id:
                             current_sentence_id = str(uuid.uuid4())
                         
-                        # Broadcast final transcription text for real-time display
-                        print(f"📡 Broadcasting Arabic text to frontend: '{final_text}'")
-                        # Broadcast directly without task wrapper
-                        await broadcast_to_displays(
-                            "transcription", 
-                            source_language, 
-                            final_text, 
-                            tenant_context,
-                            sentence_context={
-                                "sentence_id": current_sentence_id,
-                                "is_complete": False,  # Will be marked complete when sentence ends
-                                "is_fragment": True
-                            }
-                        )
-                        
                         # Handle translation logic
                         if translators:
                             # SIMPLE ACCUMULATION LOGIC - ONLY APPEND, NEVER REPLACE
@@ -445,20 +424,6 @@ async def entrypoint(job: JobContext):
                                     # Complete the accumulated sentence with this punctuation
                                     print(f"📝 PUNCTUATION SIGNAL: Completing accumulated text: '{accumulated_text}'")
                                     
-                                    # Broadcast sentence completion
-                                    if current_sentence_id:
-                                        await broadcast_to_displays(
-                                            "transcription", 
-                                            source_language, 
-                                            accumulated_text, 
-                                            tenant_context,
-                                            sentence_context={
-                                                "sentence_id": current_sentence_id,
-                                                "is_complete": True,
-                                                "is_fragment": False
-                                            }
-                                        )
-                                    
                                     # Translate the completed sentence (don't include the punctuation marker)
                                     await translate_sentences([accumulated_text], translators, source_language, current_sentence_id)
                                     
@@ -472,21 +437,9 @@ async def entrypoint(job: JobContext):
                                 # We have complete sentences - translate them immediately
                                 print(f"🎯 Found {len(complete_sentences)} complete Arabic sentences: {complete_sentences}")
                                 
-                                # Broadcast each complete sentence
+                                # Translate each complete sentence
                                 for sentence in complete_sentences:
                                     sentence_id = current_sentence_id if len(complete_sentences) == 1 else str(uuid.uuid4())
-                                    await broadcast_to_displays(
-                                        "transcription", 
-                                        source_language, 
-                                        sentence, 
-                                        tenant_context,
-                                        sentence_context={
-                                            "sentence_id": sentence_id,
-                                            "is_complete": True,
-                                            "is_fragment": False
-                                        }
-                                    )
-                                    # Translate complete sentences with sentence ID
                                     await translate_sentences([sentence], translators, source_language, sentence_id)
                                 
                                 # Update accumulated text to only remaining incomplete text
@@ -710,7 +663,7 @@ async def entrypoint(job: JobContext):
                         # Create a translator for the requested language using the language enum
                         language_obj = languages[lang]
                         language_enum = getattr(LanguageCode, language_obj.name)
-                        translators[lang] = Translator(job.room, language_enum, tenant_context, broadcast_to_displays)
+                        translators[lang] = Translator(job.room, language_enum, tenant_context)
                         logger.info(f"🆕 Added translator for ROOM {job.room.name} (requested by {participant.identity}), language: {language_obj.name}")
                         logger.info(f"🏢 Translator created with tenant context: mosque_id={tenant_context.get('mosque_id')}")
                         logger.info(f"📊 Total translators for room {job.room.name}: {len(translators)} -> {list(translators.keys())}")
@@ -733,7 +686,7 @@ async def entrypoint(job: JobContext):
     logger.info("Connecting to room...")
     await job.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
     logger.info(f"Successfully connected to room: {job.room.name}")
-    logger.info(f"📡 Real-time transcription data will be sent via Supabase Broadcast")
+    logger.info(f"📡 Real-time transcription data will be sent via LiveKit publish_transcription")
     
     # Start the heartbeat task after connection
     if tenant_context.get('session_id'):
@@ -771,8 +724,15 @@ async def entrypoint(job: JobContext):
             
             logger.info(f"🧹 Cleanup requested by frontend: reason={reason}, session_id={session_id}")
             
-            # Initiate graceful shutdown
-            asyncio.create_task(perform_graceful_cleanup(reason, session_id))
+            # Initiate graceful shutdown (tracked task)
+            def _on_graceful_cleanup_done(t):
+                if t.cancelled():
+                    logger.warning("Graceful cleanup task was cancelled")
+                elif t.exception():
+                    logger.error(f"Graceful cleanup failed: {t.exception()}", exc_info=t.exception())
+
+            graceful_task = asyncio.create_task(perform_graceful_cleanup(reason, session_id))
+            graceful_task.add_done_callback(_on_graceful_cleanup_done)
             
             return json.dumps({
                 "success": True,
@@ -819,55 +779,84 @@ async def entrypoint(job: JobContext):
     @job.room.on("disconnected")
     def on_room_disconnected():
         """Handle room disconnection - cleanup all resources"""
-        logger.info("🚪 Room disconnected, starting cleanup...")
-        
-        # Create async task for cleanup
-        async def cleanup():
-            # Log final resource statistics
-            resource_manager.log_stats()
-            
-            # Cancel heartbeat task first if it exists
-            if heartbeat_task and not heartbeat_task.done():
-                heartbeat_task.cancel()
-                try:
-                    await heartbeat_task
-                except asyncio.CancelledError:
-                    logger.debug("Heartbeat task cancelled")
-            
-            # Shutdown resource manager (cancels all tasks, closes all streams)
-            await resource_manager.shutdown()
-            
-            # Close the room session in database if we have a session_id
-            try:
-                session_id = tenant_context.get('session_id') if tenant_context else None
-                if session_id:
-                    logger.info(f"🔒 Closing database session: {session_id}")
-                    await close_room_session(session_id)
-                else:
-                    logger.warning("⚠️ No session_id found to close")
-            except Exception as e:
-                logger.error(f"Failed to close room session: {e}")
-            
-            # Close database connections
-            try:
-                await close_database_connections()
-                logger.info("✅ Database connections closed")
+        logger.info("Room disconnected, starting cleanup...")
 
-                # Force garbage collection (gc.get_objects() was removed because iterating
-                # all heap objects is itself a major memory spike on cleanup)
+        async def cleanup():
+            try:
+                # Log final resource statistics
+                resource_manager.log_stats()
+
+                # Cancel heartbeat task first if it exists
+                if heartbeat_task and not heartbeat_task.done():
+                    heartbeat_task.cancel()
+                    try:
+                        await heartbeat_task
+                    except asyncio.CancelledError:
+                        pass
+
+                # CRITICAL: Close all translators and their LLM clients FIRST
+                # Each Translator holds an openai.LLM() with httpx.AsyncClient,
+                # SSL contexts, and connection pools that leak ~200-500KB each
+                translator_count = len(translators)
+                for lang, translator in translators.items():
+                    try:
+                        await translator.close()
+                    except Exception as e:
+                        logger.error(f"Error closing translator {lang}: {e}")
+                translators.clear()
+                logger.info(f"Closed and cleared {translator_count} translators")
+
+                # Close all STT providers (each holds connection state)
+                stt_count = len(stt_providers)
+                for lang, provider in stt_providers.items():
+                    try:
+                        if hasattr(provider, 'aclose'):
+                            await provider.aclose()
+                        elif hasattr(provider, 'close'):
+                            await provider.close()
+                    except Exception as e:
+                        logger.error(f"Error closing STT provider {lang}: {e}")
+                stt_providers.clear()
+                logger.info(f"Closed and cleared {stt_count} STT providers")
+
+                # Shutdown resource manager (cancels all tasks, closes all streams)
+                await resource_manager.shutdown()
+
+                # Close the room session in database
+                try:
+                    session_id = tenant_context.get('session_id') if tenant_context else None
+                    if session_id:
+                        await close_room_session(session_id)
+                except Exception as e:
+                    logger.error(f"Failed to close room session: {e}")
+
+                # Close database connections
+                try:
+                    await close_database_connections()
+                except Exception as e:
+                    logger.debug(f"Database cleanup error: {e}")
+
+                # Force garbage collection to free any remaining cyclic references
                 import gc
                 gc.collect()
+
+                # Final verification
+                verification = await resource_manager.verify_cleanup_complete()
+                logger.info(f"Final cleanup verification: {verification}")
+
+                logger.info("Room cleanup completed successfully")
             except Exception as e:
-                logger.debug(f"Database cleanup error: {e}")
-            
-            # Final verification
-            verification = await resource_manager.verify_cleanup_complete()
-            logger.info(f"🔍 Final cleanup verification: {verification}")
-            
-            logger.info("✅ Room cleanup completed")
-        
-        # Run cleanup in the event loop
-        asyncio.create_task(cleanup())
+                logger.error(f"CRITICAL: Room cleanup failed: {e}", exc_info=True)
+
+        # Store task reference and log failures (cannot await in sync handler)
+        def _on_cleanup_done(t):
+            if t.cancelled():
+                logger.warning("Room cleanup task was cancelled before completion")
+            elif t.exception():
+                logger.error(f"CRITICAL: Room cleanup task failed: {t.exception()}", exc_info=t.exception())
+
+        cleanup_task = asyncio.create_task(cleanup())
+        cleanup_task.add_done_callback(_on_cleanup_done)
 
 
 async def request_fnc(req: JobRequest):

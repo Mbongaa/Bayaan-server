@@ -64,15 +64,16 @@ class WebhookHandler:
         try:
             # Extract room information
             room_data = payload.get("old_record", {})
-            room_name = room_data.get("livekit_room_name")
-            
+            # Fix: use capital L to match the key used in handle_room_created
+            room_name = room_data.get("Livekit_room_name")
+
             if room_name and room_name in self.active_sessions:
                 del self.active_sessions[room_name]
-                logger.info(f"🗑️ Room deleted: {room_name}")
-                logger.info(f"📊 Active sessions: {len(self.active_sessions)}")
-            
+                logger.info(f"Room deleted: {room_name}")
+                logger.info(f"Active sessions: {len(self.active_sessions)}")
+
             return {"status": "success", "room_name": room_name}
-            
+
         except Exception as e:
             logger.error(f"Error handling room deletion webhook: {e}")
             return {"status": "error", "message": str(e)}
@@ -127,17 +128,19 @@ class WebhookHandler:
         try:
             session_data = payload.get("record", {})
             session_id = session_data.get("id")
-            
-            # Update session status
+
+            # Find and remove ended sessions to prevent unbounded growth
+            rooms_to_remove = []
             for room_name, room_info in self.active_sessions.items():
                 if room_info.get("session_id") == session_id:
-                    room_info["session_ended_at"] = session_data.get("ended_at")
-                    room_info["status"] = "ended"
-                    logger.info(f"🛑 Session ended for room {room_name}: {session_id}")
-                    break
-                    
+                    rooms_to_remove.append(room_name)
+            for room_name in rooms_to_remove:
+                del self.active_sessions[room_name]
+                logger.info(f"Removed ended session for room {room_name}: {session_id}")
+
+            logger.info(f"Active sessions after cleanup: {len(self.active_sessions)}")
             return {"status": "success", "session_id": session_id}
-            
+
         except Exception as e:
             logger.error(f"Error handling session end webhook: {e}")
             return {"status": "error", "message": str(e)}

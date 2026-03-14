@@ -4,7 +4,7 @@ Handles real-time translation with context management and error handling.
 """
 import asyncio
 import logging
-from typing import Optional, Dict, Any, List, Callable
+from typing import Optional, Dict, Any, List
 from collections import deque
 from enum import Enum
 
@@ -28,32 +28,29 @@ class TranslationError(Exception):
 class Translator:
     """
     Handles translation from source language to target language with context management.
-    
+
     Features:
     - Sliding window context for better translation coherence
     - Automatic retry on failures
     - Comprehensive error handling
-    - Real-time broadcasting to displays
     """
-    
+
     # Class-level configuration from config module
     use_context = config.translation.use_context
     default_max_context_pairs = config.translation.max_context_pairs
-    
-    def __init__(self, room: rtc.Room, lang: Enum, tenant_context: Optional[Dict[str, Any]] = None, broadcast_callback: Optional[Callable] = None):
+
+    def __init__(self, room: rtc.Room, lang: Enum, tenant_context: Optional[Dict[str, Any]] = None):
         """
         Initialize the Translator.
-        
+
         Args:
             room: LiveKit room instance
             lang: Target language enum
             tenant_context: Optional context containing room_id, mosque_id, etc.
-            broadcast_callback: Optional callback function for broadcasting translations
         """
         self.room = room
         self.lang = lang
         self.tenant_context = tenant_context or {}
-        self.broadcast_callback = broadcast_callback
         self.llm = openai.LLM()
         
         # Initialize system prompt as None - will be built dynamically
@@ -107,10 +104,7 @@ class Translator:
                 if translated_message:
                     # Publish transcription to LiveKit room
                     await self._publish_transcription(translated_message, None)
-                    
-                    # Broadcast to displays
-                    await self._broadcast_translation(translated_message, sentence_id)
-                    
+
                     # Update statistics
                     self.translation_count += 1
                     
@@ -297,41 +291,26 @@ class Translator:
             logger.error(f"Failed to publish transcription: {e}")
             # Don't re-raise - translation was successful even if publishing failed
 
-    async def _broadcast_translation(self, translated_text: str, sentence_id: Optional[str] = None) -> None:
-        """
-        Broadcast the translation to WebSocket displays.
-        
-        Args:
-            translated_text: The translated text to broadcast
-            sentence_id: Optional sentence ID for tracking
-        """
-        if self.broadcast_callback:
-            try:
-                # Use asyncio.create_task to avoid blocking
-                # Include sentence context if provided
-                sentence_context = None
-                if sentence_id:
-                    sentence_context = {
-                        "sentence_id": sentence_id,
-                        "is_complete": True,
-                        "is_fragment": False
-                    }
-                
-                asyncio.create_task(
-                    self.broadcast_callback(
-                        "translation", 
-                        self.lang.value, 
-                        translated_text, 
-                        self.tenant_context,
-                        sentence_context
-                    )
-                )
-                logger.debug(f"📡 Broadcasted {self.lang.value} translation to displays")
-            except Exception as e:
-                logger.error(f"Failed to broadcast translation: {e}")
-                # Don't re-raise - translation was successful even if broadcasting failed
-        else:
-            logger.debug("No broadcast callback provided, skipping broadcast")
+    async def close(self):
+        """Close the LLM client and release all resources."""
+        # Close the openai.LLM httpx client to free SSL contexts, sockets, connection pools
+        try:
+            if hasattr(self.llm, '_client') and hasattr(self.llm._client, 'aclose'):
+                await self.llm._client.aclose()
+            elif hasattr(self.llm, 'aclose'):
+                await self.llm.aclose()
+        except Exception as e:
+            logger.warning(f"Error closing LLM client for {self.lang.value}: {e}")
+
+        # Clear context history to release string references
+        if self.use_context and hasattr(self, 'message_history'):
+            self.message_history.clear()
+
+        # Clear system prompt reference
+        self.system_prompt = None
+        self._prompt_template = None
+
+        logger.info(f"Translator closed for {self.lang.value} (translations={self.translation_count}, errors={self.error_count})")
 
     def get_statistics(self) -> Dict[str, Any]:
         """
