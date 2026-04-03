@@ -24,6 +24,8 @@ from livekit.agents import (
     utils,
 )
 from livekit.plugins import silero, speechmatics, elevenlabs
+from livekit.plugins.speechmatics import TurnDetectionMode
+from speechmatics.voice import SpeechSegmentConfig
 
 # Import configuration
 from config import get_config, ApplicationConfig
@@ -317,16 +319,33 @@ async def entrypoint(job: JobContext):
                 # Direct kwargs — verified against livekit-plugins-speechmatics 1.4.6 source
                 stt_language = get_display_language_code(language_code)
 
-                stt_providers[language_code] = speechmatics.STT(
+                provider = speechmatics.STT(
                     language=stt_language,
                     operating_point=stt_config.operating_point,
                     include_partials=stt_config.enable_partials,
                     max_delay=stt_config.max_delay,
                     punctuation_overrides={"sensitivity": stt_config.punctuation_sensitivity},
                     enable_diarization=bool(stt_config.diarization),
+                    # FIXED mode = no VAD, no adaptive — behaves like old 1.2.x RT API
+                    turn_detection_mode=TurnDetectionMode.FIXED,
                 )
+
+                # Force sentence-based emission like 1.2.x RT API did.
+                # The FIXED preset defaults to emit_sentences=False (VAD-driven).
+                # We override to True so Speechmatics waits for real sentence
+                # boundaries before emitting segments.
+                original_prepare = provider._prepare_config
+                def _patched_prepare(*args, _orig=original_prepare, **kwargs):
+                    config = _orig(*args, **kwargs)
+                    config.speech_segment_config = SpeechSegmentConfig(emit_sentences=True)
+                    config.vad_config = None  # disable VAD
+                    return config
+                provider._prepare_config = _patched_prepare
+
+                stt_providers[language_code] = provider
                 logger.info(f"🆕 Created Speechmatics STT provider for language: {stt_language} "
-                           f"(punct_sensitivity={stt_config.punctuation_sensitivity}, "
+                           f"(FIXED mode, emit_sentences=True, no VAD, "
+                           f"punct_sensitivity={stt_config.punctuation_sensitivity}, "
                            f"max_delay={stt_config.max_delay}s)")
 
         return stt_providers[language_code]
