@@ -313,8 +313,11 @@ async def entrypoint(job: JobContext):
                 stt_providers[language_code] = elevenlabs.STT(
                     model_id="scribe_v2_realtime",
                     language_code="ar",
+                    server_vad={
+                        "min_silence_duration_ms": 500,
+                    },
                 )
-                logger.info("🆕 Created ElevenLabs Scribe v2 realtime STT provider for Arabic")
+                logger.info("🆕 Created ElevenLabs Scribe v2 realtime STT provider for Arabic (server_vad, 500ms silence)")
             else:
                 # Direct kwargs — verified against livekit-plugins-speechmatics 1.4.6 source
                 stt_language = get_display_language_code(language_code)
