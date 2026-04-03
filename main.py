@@ -394,8 +394,14 @@ async def entrypoint(job: JobContext):
     async def _forward_transcription(
         stt_stream: stt.SpeechStream,
         track: rtc.Track,
+        use_accumulator: bool = True,
     ):
-        """Forward the transcription and log the transcript in the console"""
+        """Forward the transcription and log the transcript in the console.
+
+        Args:
+            use_accumulator: If True, use sentence-based accumulation (Speechmatics).
+                If False, translate each FINAL_TRANSCRIPT directly (ElevenLabs VAD).
+        """
         nonlocal accumulated_text, last_final_transcript, current_sentence_id
         
         try:
@@ -434,6 +440,15 @@ async def entrypoint(job: JobContext):
                         
                         # Handle translation logic
                         if translators:
+                            # ElevenLabs VAD mode: each committed transcript is already
+                            # a natural phrase boundary — translate directly, no accumulation.
+                            if not use_accumulator:
+                                sentence_id = current_sentence_id or str(uuid.uuid4())
+                                logger.info(f"🎯 Direct translation (VAD commit): '{final_text}'")
+                                await translate_sentences([final_text], translators, source_language, sentence_id)
+                                current_sentence_id = None
+                                continue
+
                             # SIMPLE ACCUMULATION LOGIC - ONLY APPEND, NEVER REPLACE
                             if accumulated_text:
                                 # ALWAYS append new final transcript to existing accumulated text
@@ -489,7 +504,7 @@ async def entrypoint(job: JobContext):
             logger.error(f"STT transcription error: {str(e)}")
             raise
 
-    async def transcribe_track(participant: rtc.RemoteParticipant, track: rtc.Track, stt_provider):
+    async def transcribe_track(participant: rtc.RemoteParticipant, track: rtc.Track, stt_provider, lang_code: str = "ar"):
         """Transcribe audio track using the provided STT provider."""
         # Get language from provider's config
         if hasattr(stt_provider, '_transcription_config'):
@@ -498,7 +513,10 @@ async def entrypoint(job: JobContext):
             provider_lang = get_display_language_code(source_language)
         language_name = languages[provider_lang].name if provider_lang in languages else provider_lang
 
-        logger.info(f"🎤 Starting {language_name} transcription for participant {participant.identity}, track {track.sid}")
+        # ElevenLabs uses server VAD — each commit is a natural phrase, no accumulation needed
+        use_accumulator = not lang_code.endswith("-eleven")
+
+        logger.info(f"🎤 Starting {language_name} transcription for participant {participant.identity}, track {track.sid} (accumulator={'ON' if use_accumulator else 'OFF (VAD)'})")
 
         try:
             audio_stream = rtc.AudioStream(track)
@@ -507,7 +525,7 @@ async def entrypoint(job: JobContext):
             async with resource_manager.stt_manager.create_stream(stt_provider, participant.identity) as stt_stream:
                 # Create transcription task with tracking
                 stt_task = resource_manager.task_manager.create_task(
-                    _forward_transcription(stt_stream, track),
+                    _forward_transcription(stt_stream, track, use_accumulator=use_accumulator),
                     name=f"transcribe-{participant.identity}",
                     metadata={"participant": participant.identity, "track": track.sid}
                 )
@@ -566,7 +584,7 @@ async def entrypoint(job: JobContext):
             provider = get_or_create_stt_provider(participant_lang)
 
             task = resource_manager.task_manager.create_task(
-                transcribe_track(participant, track, provider),  # Pass language-specific provider
+                transcribe_track(participant, track, provider, lang_code=participant_lang),
                 name=f"track-handler-{participant.identity}",
                 metadata={"participant": participant.identity, "track": track.sid, "language": participant_lang}
             )
