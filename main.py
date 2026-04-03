@@ -284,22 +284,19 @@ async def entrypoint(job: JobContext):
     # Create STT configuration with room-specific overrides
     stt_config = config.speechmatics.with_room_settings(room_config)
     
-    # Get domain from room config (default to 'broadcast' for sermons)
-    domain = room_config.get('speechmatics_domain', 'broadcast') if room_config else 'broadcast'
-    logger.info(f"[INFO] Speechmatics domain configured: {domain}")
-    
     # Build Speechmatics STT base params (1.4.x API — direct constructor args)
+    # NOTE: "domain" removed — in 1.4.x it gets concatenated with language (e.g. ar-broadcast)
+    # and Speechmatics has no ar-broadcast lang pack, causing Feature Validation Failed errors.
     speechmatics_base_params = {
         "language": stt_config.language,
         "operating_point": stt_config.operating_point,
         "include_partials": stt_config.enable_partials,
         "max_delay": stt_config.max_delay,
         "punctuation_overrides": {"sensitivity": stt_config.punctuation_sensitivity},
-        "enable_diarization": stt_config.diarization if stt_config.diarization else False,
-        "domain": domain,
+        "enable_diarization": bool(stt_config.diarization),
     }
 
-    logger.info(f"📋 Speechmatics STT params: domain={domain}, lang={stt_config.language}")
+    logger.info(f"📋 Speechmatics STT params: lang={stt_config.language}")
 
     # Initialize STT providers dictionary for multi-language support
     stt_providers = {}  # language_code -> STT provider
