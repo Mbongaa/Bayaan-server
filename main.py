@@ -322,7 +322,6 @@ async def entrypoint(job: JobContext):
             if language_code == "ar-eleven":
                 stt_providers[language_code] = elevenlabs.STT(
                     language_code="ar",
-                    use_realtime=True,
                 )
                 logger.info("🆕 Created ElevenLabs Scribe v2 STT provider for Arabic")
             else:
