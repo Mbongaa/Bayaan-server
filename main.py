@@ -12,10 +12,6 @@ from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass, asdict
 
-# Apply domain support patch BEFORE importing speechmatics
-from speechmatics_domain_patch import patch_speechmatics_for_domain_support
-patch_speechmatics_for_domain_support()
-
 from livekit import rtc
 from livekit.agents import (
     AutoSubscribe,
@@ -28,7 +24,6 @@ from livekit.agents import (
     utils,
 )
 from livekit.plugins import silero, speechmatics, elevenlabs
-from livekit.plugins.speechmatics.types import TranscriptionConfig
 
 # Import configuration
 from config import get_config, ApplicationConfig
@@ -293,18 +288,18 @@ async def entrypoint(job: JobContext):
     domain = room_config.get('speechmatics_domain', 'broadcast') if room_config else 'broadcast'
     logger.info(f"[INFO] Speechmatics domain configured: {domain}")
     
-    # Build TranscriptionConfig parameters with domain support
-    transcription_params = {
+    # Build Speechmatics STT base params (1.4.x API — direct constructor args)
+    speechmatics_base_params = {
         "language": stt_config.language,
         "operating_point": stt_config.operating_point,
-        "enable_partials": stt_config.enable_partials,
+        "include_partials": stt_config.enable_partials,
         "max_delay": stt_config.max_delay,
         "punctuation_overrides": {"sensitivity": stt_config.punctuation_sensitivity},
-        "diarization": stt_config.diarization,
-        "domain": domain  # Our patch makes this work!
+        "enable_diarization": stt_config.diarization if stt_config.diarization else False,
+        "domain": domain,
     }
-    
-    logger.info(f"📋 Creating TranscriptionConfig with domain: {domain}")
+
+    logger.info(f"📋 Speechmatics STT params: domain={domain}, lang={stt_config.language}")
 
     # Initialize STT providers dictionary for multi-language support
     stt_providers = {}  # language_code -> STT provider
@@ -330,12 +325,10 @@ async def entrypoint(job: JobContext):
                 # Extract base BCP-47 code — routing keys like "ar-mixed"/"ar-darija"
                 # are not valid Speechmatics language codes
                 stt_language = get_display_language_code(language_code)
-                lang_params = transcription_params.copy()
+                lang_params = speechmatics_base_params.copy()
                 lang_params["language"] = stt_language
 
-                stt_providers[language_code] = speechmatics.STT(
-                    transcription_config=TranscriptionConfig(**lang_params)
-                )
+                stt_providers[language_code] = speechmatics.STT(**lang_params)
                 logger.info(f"🆕 Created Speechmatics STT provider for language: {stt_language} ({languages[language_code].name if language_code in languages else language_code})")
 
         return stt_providers[language_code]
