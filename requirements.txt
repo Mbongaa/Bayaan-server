@@ -4,6 +4,7 @@ livekit-agents==1.2.1
 livekit-plugins-openai==1.2.1
 livekit-plugins-speechmatics==1.2.1
 livekit-plugins-silero==1.2.1
+livekit-plugins-elevenlabs>=1.2.1
 
 # AI/ML Dependencies
 openai>=1.0.0

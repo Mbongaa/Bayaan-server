@@ -27,7 +27,7 @@ from livekit.agents import (
     stt,
     utils,
 )
-from livekit.plugins import silero, speechmatics
+from livekit.plugins import silero, speechmatics, elevenlabs
 from livekit.plugins.speechmatics.types import TranscriptionConfig
 
 # Import configuration
@@ -309,18 +309,31 @@ async def entrypoint(job: JobContext):
     # Initialize STT providers dictionary for multi-language support
     stt_providers = {}  # language_code -> STT provider
 
+    def get_display_language_code(code: str) -> str:
+        """Map internal routing code to BCP-47 for publishing. ar-eleven -> ar"""
+        if code.startswith("ar"):
+            return "ar"
+        return code
+
     # Helper function to get or create STT provider for a language
     def get_or_create_stt_provider(language_code: str):
         """Get existing STT provider or create new one for the specified language."""
         if language_code not in stt_providers:
-            # Build config for this specific language
-            lang_params = transcription_params.copy()
-            lang_params["language"] = language_code
+            if language_code == "ar-eleven":
+                stt_providers[language_code] = elevenlabs.STT(
+                    model_id="scribe_v2_realtime",
+                    language_code="ar",
+                )
+                logger.info("🆕 Created ElevenLabs Scribe v2 STT provider for Arabic")
+            else:
+                # Build config for this specific language (Speechmatics)
+                lang_params = transcription_params.copy()
+                lang_params["language"] = language_code
 
-            stt_providers[language_code] = speechmatics.STT(
-                transcription_config=TranscriptionConfig(**lang_params)
-            )
-            logger.info(f"🆕 Created STT provider for language: {language_code} ({languages[language_code].name if language_code in languages else language_code})")
+                stt_providers[language_code] = speechmatics.STT(
+                    transcription_config=TranscriptionConfig(**lang_params)
+                )
+                logger.info(f"🆕 Created Speechmatics STT provider for language: {language_code} ({languages[language_code].name if language_code in languages else language_code})")
 
         return stt_providers[language_code]
 
@@ -387,7 +400,7 @@ async def entrypoint(job: JobContext):
                                 text=final_text,
                                 start_time=0,
                                 end_time=0,
-                                language=source_language,  # Arabic
+                                language=get_display_language_code(source_language),  # BCP-47 code
                                 final=True,
                             )
                             final_transcription = rtc.Transcription(
@@ -395,7 +408,7 @@ async def entrypoint(job: JobContext):
                             )
                             await job.room.local_participant.publish_transcription(final_transcription)
                             
-                            logger.info(f"✅ Published final {languages[source_language].name} transcription: '{final_text}'")
+                            logger.info(f"✅ Published final {languages.get(source_language, languages.get('ar')).name} transcription: '{final_text}'")
                         except Exception as e:
                             logger.error(f"❌ Failed to publish final transcription: {str(e)}")
                         
@@ -463,7 +476,10 @@ async def entrypoint(job: JobContext):
     async def transcribe_track(participant: rtc.RemoteParticipant, track: rtc.Track, stt_provider):
         """Transcribe audio track using the provided STT provider."""
         # Get language from provider's config
-        provider_lang = stt_provider._transcription_config.language if hasattr(stt_provider, '_transcription_config') else source_language
+        if hasattr(stt_provider, '_transcription_config'):
+            provider_lang = stt_provider._transcription_config.language
+        else:
+            provider_lang = get_display_language_code(source_language)
         language_name = languages[provider_lang].name if provider_lang in languages else provider_lang
 
         logger.info(f"🎤 Starting {language_name} transcription for participant {participant.identity}, track {track.sid}")

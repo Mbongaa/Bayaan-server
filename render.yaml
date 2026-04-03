@@ -23,6 +23,8 @@ services:
         fromSecret: openai_api_key
       - key: SPEECHMATICS_API_KEY
         fromSecret: speechmatics_api_key
+      - key: ELEVEN_API_KEY
+        fromSecret: eleven_api_key
       - key: SUPABASE_URL
         fromSecret: supabase_url
       - key: SUPABASE_SERVICE_ROLE_KEY
