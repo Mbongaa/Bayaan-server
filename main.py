@@ -327,13 +327,16 @@ async def entrypoint(job: JobContext):
                 logger.info("🆕 Created ElevenLabs Scribe v2 STT provider for Arabic")
             else:
                 # Build config for this specific language (Speechmatics)
+                # Extract base BCP-47 code — routing keys like "ar-mixed"/"ar-darija"
+                # are not valid Speechmatics language codes
+                stt_language = get_display_language_code(language_code)
                 lang_params = transcription_params.copy()
-                lang_params["language"] = language_code
+                lang_params["language"] = stt_language
 
                 stt_providers[language_code] = speechmatics.STT(
                     transcription_config=TranscriptionConfig(**lang_params)
                 )
-                logger.info(f"🆕 Created Speechmatics STT provider for language: {language_code} ({languages[language_code].name if language_code in languages else language_code})")
+                logger.info(f"🆕 Created Speechmatics STT provider for language: {stt_language} ({languages[language_code].name if language_code in languages else language_code})")
 
         return stt_providers[language_code]
 
