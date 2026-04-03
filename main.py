@@ -30,6 +30,12 @@ from livekit.agents import (
 from livekit.plugins import silero, speechmatics, elevenlabs
 from livekit.plugins.speechmatics.types import TranscriptionConfig
 
+# Log ElevenLabs plugin version and STT constructor signature for debugging
+import inspect as _inspect
+_eleven_ver = getattr(elevenlabs, '__version__', 'unknown')
+_eleven_stt_sig = _inspect.signature(elevenlabs.STT.__init__)
+print(f"📦 livekit-plugins-elevenlabs version: {_eleven_ver}, STT params: {_eleven_stt_sig}")
+
 # Import configuration
 from config import get_config, ApplicationConfig
 
