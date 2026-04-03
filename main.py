@@ -30,12 +30,6 @@ from livekit.agents import (
 from livekit.plugins import silero, speechmatics, elevenlabs
 from livekit.plugins.speechmatics.types import TranscriptionConfig
 
-# Log ElevenLabs plugin version and STT constructor signature for debugging
-import inspect as _inspect
-_eleven_ver = getattr(elevenlabs, '__version__', 'unknown')
-_eleven_stt_sig = _inspect.signature(elevenlabs.STT.__init__)
-print(f"📦 livekit-plugins-elevenlabs version: {_eleven_ver}, STT params: {_eleven_stt_sig}")
-
 # Import configuration
 from config import get_config, ApplicationConfig
 
@@ -327,9 +321,10 @@ async def entrypoint(job: JobContext):
         if language_code not in stt_providers:
             if language_code == "ar-eleven":
                 stt_providers[language_code] = elevenlabs.STT(
+                    model_id="scribe_v2_realtime",
                     language_code="ar",
                 )
-                logger.info("🆕 Created ElevenLabs Scribe v2 STT provider for Arabic")
+                logger.info("🆕 Created ElevenLabs Scribe v2 realtime STT provider for Arabic")
             else:
                 # Build config for this specific language (Speechmatics)
                 # Extract base BCP-47 code — routing keys like "ar-mixed"/"ar-darija"
