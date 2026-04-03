@@ -51,7 +51,7 @@ class Translator:
         self.room = room
         self.lang = lang
         self.tenant_context = tenant_context or {}
-        self.llm = openai.LLM()
+        self.llm = openai.LLM(model="gpt-4.1")
         
         # Initialize system prompt as None - will be built dynamically
         self.system_prompt = None
