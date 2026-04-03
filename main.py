@@ -287,12 +287,14 @@ async def entrypoint(job: JobContext):
     # Build Speechmatics STT base params (1.4.x API — direct constructor args)
     # NOTE: "domain" removed — in 1.4.x it gets concatenated with language (e.g. ar-broadcast)
     # and Speechmatics has no ar-broadcast lang pack, causing Feature Validation Failed errors.
+    # NOTE: "punctuation_overrides" removed — not a valid 1.4.x param (silently ignored),
+    # which caused default aggressive punctuation → per-word sentence flushing.
+    # NOTE: "include_partials" renamed to "enable_partials" — correct 1.4.x param name.
     speechmatics_base_params = {
         "language": stt_config.language,
         "operating_point": stt_config.operating_point,
-        "include_partials": stt_config.enable_partials,
+        "enable_partials": stt_config.enable_partials,
         "max_delay": stt_config.max_delay,
-        "punctuation_overrides": {"sensitivity": stt_config.punctuation_sensitivity},
         "enable_diarization": bool(stt_config.diarization),
     }
 
@@ -423,35 +425,60 @@ async def entrypoint(job: JobContext):
                             
                             # Extract complete sentences from accumulated text
                             complete_sentences, remaining_text = extract_complete_sentences(accumulated_text)
-                            
+
+                            # Minimum word threshold — don't translate tiny fragments.
+                            # Speechmatics 1.4.x can emit aggressive punctuation (e.g. a period
+                            # after every 1-2 words), so we require at least 3 words before
+                            # treating a punctuated segment as a translatable sentence.
+                            MIN_WORDS_FOR_SENTENCE = 3
+
                             # Handle special punctuation completion signal
                             if complete_sentences and complete_sentences[0] == "PUNCTUATION_COMPLETE":
-                                if accumulated_text.strip():
+                                word_count = len(accumulated_text.split())
+                                if accumulated_text.strip() and word_count >= MIN_WORDS_FOR_SENTENCE:
                                     # Complete the accumulated sentence with this punctuation
-                                    print(f"📝 PUNCTUATION SIGNAL: Completing accumulated text: '{accumulated_text}'")
-                                    
+                                    print(f"📝 PUNCTUATION SIGNAL: Completing accumulated text ({word_count} words): '{accumulated_text}'")
+
                                     # Translate the completed sentence (don't include the punctuation marker)
                                     await translate_sentences([accumulated_text], translators, source_language, current_sentence_id)
-                                    
+
                                     # Clear accumulated text as sentence is now complete
                                     accumulated_text = ""
                                     current_sentence_id = None
                                     print(f"📝 Cleared accumulated text after punctuation completion")
+                                elif accumulated_text.strip():
+                                    # Too short — keep accumulating
+                                    print(f"⏳ Punctuation signal but only {word_count} word(s), keep accumulating: '{accumulated_text}'")
                                 else:
                                     print(f"⚠️ Received punctuation completion signal but no accumulated text")
                             elif complete_sentences:
-                                # We have complete sentences - translate them immediately
-                                print(f"🎯 Found {len(complete_sentences)} complete Arabic sentences: {complete_sentences}")
-                                
-                                # Translate each complete sentence
+                                # Filter out sentences that are too short — keep them in the accumulator
+                                ready_sentences = []
+                                deferred_text = ""
                                 for sentence in complete_sentences:
-                                    sentence_id = current_sentence_id if len(complete_sentences) == 1 else str(uuid.uuid4())
-                                    await translate_sentences([sentence], translators, source_language, sentence_id)
-                                
-                                # Update accumulated text to only remaining incomplete text
-                                accumulated_text = remaining_text
+                                    if len(sentence.split()) >= MIN_WORDS_FOR_SENTENCE:
+                                        # Include any deferred text as prefix of this sentence
+                                        if deferred_text:
+                                            sentence = deferred_text.strip() + " " + sentence
+                                            deferred_text = ""
+                                        ready_sentences.append(sentence)
+                                    else:
+                                        # Too short — defer it back into accumulation
+                                        deferred_text += (" " + sentence if deferred_text else sentence)
+
+                                if ready_sentences:
+                                    print(f"🎯 Found {len(ready_sentences)} translatable Arabic sentences: {ready_sentences}")
+
+                                    # Translate each ready sentence
+                                    for sentence in ready_sentences:
+                                        sentence_id = current_sentence_id if len(ready_sentences) == 1 else str(uuid.uuid4())
+                                        await translate_sentences([sentence], translators, source_language, sentence_id)
+
+                                # Remaining = deferred short sentences + leftover unpunctuated text
+                                leftover = (deferred_text + " " + remaining_text).strip() if deferred_text else remaining_text
+                                accumulated_text = leftover
                                 # Generate new sentence ID for the remaining text
-                                current_sentence_id = str(uuid.uuid4()) if remaining_text else None
+                                current_sentence_id = str(uuid.uuid4()) if accumulated_text else None
                                 print(f"📝 Updated accumulated Arabic text after sentence extraction: '{accumulated_text}'")
                             
                             # Log remaining incomplete text (no delayed translation)
