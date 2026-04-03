@@ -24,6 +24,7 @@ from livekit.agents import (
     utils,
 )
 from livekit.plugins import silero, speechmatics, elevenlabs
+from livekit.plugins.speechmatics.types import TranscriptionConfig
 
 # Import configuration
 from config import get_config, ApplicationConfig
@@ -284,21 +285,12 @@ async def entrypoint(job: JobContext):
     # Create STT configuration with room-specific overrides
     stt_config = config.speechmatics.with_room_settings(room_config)
     
-    # Build Speechmatics STT base params (1.4.x API — direct constructor args)
-    # NOTE: "domain" removed — in 1.4.x it gets concatenated with language (e.g. ar-broadcast)
-    # and Speechmatics has no ar-broadcast lang pack, causing Feature Validation Failed errors.
-    # NOTE: "punctuation_overrides" removed — not a valid 1.4.x param (silently ignored),
-    # which caused default aggressive punctuation → per-word sentence flushing.
-    # NOTE: "include_partials" renamed to "enable_partials" — correct 1.4.x param name.
-    speechmatics_base_params = {
-        "language": stt_config.language,
-        "operating_point": stt_config.operating_point,
-        "enable_partials": stt_config.enable_partials,
-        "max_delay": stt_config.max_delay,
-        "enable_diarization": bool(stt_config.diarization),
-    }
-
-    logger.info(f"📋 Speechmatics STT params: lang={stt_config.language}")
+    # Speechmatics STT config — use TranscriptionConfig (not direct kwargs) so that
+    # punctuation_overrides is actually sent to the Speechmatics API.
+    # Direct kwargs silently drop punctuation_overrides, causing period-after-every-word.
+    # NOTE: "domain" intentionally omitted — in 1.4.x it gets concatenated with language
+    # (e.g. ar-broadcast) and Speechmatics has no ar-broadcast lang pack.
+    logger.info(f"📋 Speechmatics STT config: lang={stt_config.language}, punct_sensitivity={stt_config.punctuation_sensitivity}")
 
     # Initialize STT providers dictionary for multi-language support
     stt_providers = {}  # language_code -> STT provider
@@ -320,15 +312,24 @@ async def entrypoint(job: JobContext):
                 )
                 logger.info("🆕 Created ElevenLabs Scribe v2 realtime STT provider for Arabic")
             else:
-                # Build config for this specific language (Speechmatics)
+                # Build TranscriptionConfig for this language (Speechmatics)
                 # Extract base BCP-47 code — routing keys like "ar-mixed"/"ar-darija"
                 # are not valid Speechmatics language codes
                 stt_language = get_display_language_code(language_code)
-                lang_params = speechmatics_base_params.copy()
-                lang_params["language"] = stt_language
 
-                stt_providers[language_code] = speechmatics.STT(**lang_params)
-                logger.info(f"🆕 Created Speechmatics STT provider for language: {stt_language} ({languages[language_code].name if language_code in languages else language_code})")
+                stt_providers[language_code] = speechmatics.STT(
+                    transcription_config=TranscriptionConfig(
+                        language=stt_language,
+                        operating_point=stt_config.operating_point,
+                        enable_partials=stt_config.enable_partials,
+                        max_delay=stt_config.max_delay,
+                        punctuation_overrides={"sensitivity": stt_config.punctuation_sensitivity},
+                        diarization=stt_config.diarization,
+                    )
+                )
+                logger.info(f"🆕 Created Speechmatics STT provider for language: {stt_language} "
+                           f"(punct_sensitivity={stt_config.punctuation_sensitivity}, "
+                           f"max_delay={stt_config.max_delay}s)")
 
         return stt_providers[language_code]
 
