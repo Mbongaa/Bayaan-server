@@ -1,9 +1,10 @@
-# LiveKit Core Dependencies - EXACT VERSIONS FROM JULY 28 DEPLOYMENT
-livekit==1.0.12
-livekit-agents==1.2.1
-livekit-plugins-openai==1.2.1
-livekit-plugins-speechmatics==1.2.1
-livekit-plugins-silero==1.2.1
+# LiveKit Core Dependencies - Upgraded for ElevenLabs Scribe v2 realtime STT
+livekit==1.1.2
+livekit-agents==1.4.6
+livekit-plugins-openai==1.4.6
+livekit-plugins-speechmatics==1.4.6
+livekit-plugins-silero==1.4.6
+livekit-plugins-elevenlabs==1.4.6
 
 # AI/ML Dependencies
 openai>=1.0.0

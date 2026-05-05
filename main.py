@@ -12,10 +12,6 @@ from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass, asdict
 
-# Apply domain support patch BEFORE importing speechmatics
-from speechmatics_domain_patch import patch_speechmatics_for_domain_support
-patch_speechmatics_for_domain_support()
-
 from livekit import rtc
 from livekit.agents import (
     AutoSubscribe,
@@ -27,8 +23,9 @@ from livekit.agents import (
     stt,
     utils,
 )
-from livekit.plugins import silero, speechmatics
-from livekit.plugins.speechmatics.types import TranscriptionConfig
+from livekit.plugins import silero, speechmatics, elevenlabs
+from livekit.plugins.speechmatics import TurnDetectionMode
+from speechmatics.voice import SpeechSegmentConfig
 
 # Import configuration
 from config import get_config, ApplicationConfig
@@ -289,38 +286,70 @@ async def entrypoint(job: JobContext):
     # Create STT configuration with room-specific overrides
     stt_config = config.speechmatics.with_room_settings(room_config)
     
-    # Get domain from room config (default to 'broadcast' for sermons)
-    domain = room_config.get('speechmatics_domain', 'broadcast') if room_config else 'broadcast'
-    logger.info(f"[INFO] Speechmatics domain configured: {domain}")
-    
-    # Build TranscriptionConfig parameters with domain support
-    transcription_params = {
-        "language": stt_config.language,
-        "operating_point": stt_config.operating_point,
-        "enable_partials": stt_config.enable_partials,
-        "max_delay": stt_config.max_delay,
-        "punctuation_overrides": {"sensitivity": stt_config.punctuation_sensitivity},
-        "diarization": stt_config.diarization,
-        "domain": domain  # Our patch makes this work!
-    }
-    
-    logger.info(f"📋 Creating TranscriptionConfig with domain: {domain}")
+    # Speechmatics 1.4.6 STT — direct kwargs on speechmatics.STT().
+    # Verified from actual plugin source (stt.py):
+    #   - include_partials (NOT enable_partials — that's deprecated)
+    #   - punctuation_overrides: {"sensitivity": 0.5} — controls how aggressively
+    #     Speechmatics inserts periods. Without this, it puts a period after every word.
+    #   - domain: intentionally omitted — concatenates with language (ar-broadcast fails)
+    logger.info(f"📋 Speechmatics STT config: lang={stt_config.language}, "
+               f"punct_sensitivity={stt_config.punctuation_sensitivity}, "
+               f"max_delay={stt_config.max_delay}s")
 
     # Initialize STT providers dictionary for multi-language support
     stt_providers = {}  # language_code -> STT provider
+
+    def get_display_language_code(code: str) -> str:
+        """Map internal routing code to BCP-47 for publishing. ar-eleven -> ar"""
+        if code.startswith("ar"):
+            return "ar"
+        return code
 
     # Helper function to get or create STT provider for a language
     def get_or_create_stt_provider(language_code: str):
         """Get existing STT provider or create new one for the specified language."""
         if language_code not in stt_providers:
-            # Build config for this specific language
-            lang_params = transcription_params.copy()
-            lang_params["language"] = language_code
+            if language_code == "ar-eleven":
+                stt_providers[language_code] = elevenlabs.STT(
+                    model_id="scribe_v2_realtime",
+                    language_code="ar",
+                    server_vad={
+                        "min_silence_duration_ms": 500,
+                    },
+                )
+                logger.info("🆕 Created ElevenLabs Scribe v2 realtime STT provider for Arabic (server_vad, 500ms silence)")
+            else:
+                # Direct kwargs — verified against livekit-plugins-speechmatics 1.4.6 source
+                stt_language = get_display_language_code(language_code)
 
-            stt_providers[language_code] = speechmatics.STT(
-                transcription_config=TranscriptionConfig(**lang_params)
-            )
-            logger.info(f"🆕 Created STT provider for language: {language_code} ({languages[language_code].name if language_code in languages else language_code})")
+                provider = speechmatics.STT(
+                    language=stt_language,
+                    operating_point=stt_config.operating_point,
+                    include_partials=stt_config.enable_partials,
+                    max_delay=stt_config.max_delay,
+                    punctuation_overrides={"sensitivity": stt_config.punctuation_sensitivity},
+                    enable_diarization=bool(stt_config.diarization),
+                    # FIXED mode = no VAD, no adaptive — behaves like old 1.2.x RT API
+                    turn_detection_mode=TurnDetectionMode.FIXED,
+                )
+
+                # Force sentence-based emission like 1.2.x RT API did.
+                # The FIXED preset defaults to emit_sentences=False (VAD-driven).
+                # We override to True so Speechmatics waits for real sentence
+                # boundaries before emitting segments.
+                original_prepare = provider._prepare_config
+                def _patched_prepare(*args, _orig=original_prepare, **kwargs):
+                    config = _orig(*args, **kwargs)
+                    config.speech_segment_config = SpeechSegmentConfig(emit_sentences=True)
+                    config.vad_config = None  # disable VAD
+                    return config
+                provider._prepare_config = _patched_prepare
+
+                stt_providers[language_code] = provider
+                logger.info(f"🆕 Created Speechmatics STT provider for language: {stt_language} "
+                           f"(FIXED mode, emit_sentences=True, no VAD, "
+                           f"punct_sensitivity={stt_config.punctuation_sensitivity}, "
+                           f"max_delay={stt_config.max_delay}s)")
 
         return stt_providers[language_code]
 
@@ -365,8 +394,14 @@ async def entrypoint(job: JobContext):
     async def _forward_transcription(
         stt_stream: stt.SpeechStream,
         track: rtc.Track,
+        use_accumulator: bool = True,
     ):
-        """Forward the transcription and log the transcript in the console"""
+        """Forward the transcription and log the transcript in the console.
+
+        Args:
+            use_accumulator: If True, use sentence-based accumulation (Speechmatics).
+                If False, translate each FINAL_TRANSCRIPT directly (ElevenLabs VAD).
+        """
         nonlocal accumulated_text, last_final_transcript, current_sentence_id
         
         try:
@@ -387,7 +422,7 @@ async def entrypoint(job: JobContext):
                                 text=final_text,
                                 start_time=0,
                                 end_time=0,
-                                language=source_language,  # Arabic
+                                language=get_display_language_code(source_language),  # BCP-47 code
                                 final=True,
                             )
                             final_transcription = rtc.Transcription(
@@ -395,7 +430,7 @@ async def entrypoint(job: JobContext):
                             )
                             await job.room.local_participant.publish_transcription(final_transcription)
                             
-                            logger.info(f"✅ Published final {languages[source_language].name} transcription: '{final_text}'")
+                            logger.info(f"✅ Published final {languages.get(source_language, languages.get('ar')).name} transcription: '{final_text}'")
                         except Exception as e:
                             logger.error(f"❌ Failed to publish final transcription: {str(e)}")
                         
@@ -405,6 +440,15 @@ async def entrypoint(job: JobContext):
                         
                         # Handle translation logic
                         if translators:
+                            # ElevenLabs VAD mode: each committed transcript is already
+                            # a natural phrase boundary — translate directly, no accumulation.
+                            if not use_accumulator:
+                                sentence_id = current_sentence_id or str(uuid.uuid4())
+                                logger.info(f"🎯 Direct translation (VAD commit): '{final_text}'")
+                                await translate_sentences([final_text], translators, source_language, sentence_id)
+                                current_sentence_id = None
+                                continue
+
                             # SIMPLE ACCUMULATION LOGIC - ONLY APPEND, NEVER REPLACE
                             if accumulated_text:
                                 # ALWAYS append new final transcript to existing accumulated text
@@ -417,16 +461,16 @@ async def entrypoint(job: JobContext):
                             
                             # Extract complete sentences from accumulated text
                             complete_sentences, remaining_text = extract_complete_sentences(accumulated_text)
-                            
+
                             # Handle special punctuation completion signal
                             if complete_sentences and complete_sentences[0] == "PUNCTUATION_COMPLETE":
                                 if accumulated_text.strip():
                                     # Complete the accumulated sentence with this punctuation
                                     print(f"📝 PUNCTUATION SIGNAL: Completing accumulated text: '{accumulated_text}'")
-                                    
+
                                     # Translate the completed sentence (don't include the punctuation marker)
                                     await translate_sentences([accumulated_text], translators, source_language, current_sentence_id)
-                                    
+
                                     # Clear accumulated text as sentence is now complete
                                     accumulated_text = ""
                                     current_sentence_id = None
@@ -436,12 +480,12 @@ async def entrypoint(job: JobContext):
                             elif complete_sentences:
                                 # We have complete sentences - translate them immediately
                                 print(f"🎯 Found {len(complete_sentences)} complete Arabic sentences: {complete_sentences}")
-                                
+
                                 # Translate each complete sentence
                                 for sentence in complete_sentences:
                                     sentence_id = current_sentence_id if len(complete_sentences) == 1 else str(uuid.uuid4())
                                     await translate_sentences([sentence], translators, source_language, sentence_id)
-                                
+
                                 # Update accumulated text to only remaining incomplete text
                                 accumulated_text = remaining_text
                                 # Generate new sentence ID for the remaining text
@@ -460,13 +504,19 @@ async def entrypoint(job: JobContext):
             logger.error(f"STT transcription error: {str(e)}")
             raise
 
-    async def transcribe_track(participant: rtc.RemoteParticipant, track: rtc.Track, stt_provider):
+    async def transcribe_track(participant: rtc.RemoteParticipant, track: rtc.Track, stt_provider, lang_code: str = "ar"):
         """Transcribe audio track using the provided STT provider."""
         # Get language from provider's config
-        provider_lang = stt_provider._transcription_config.language if hasattr(stt_provider, '_transcription_config') else source_language
+        if hasattr(stt_provider, '_transcription_config'):
+            provider_lang = stt_provider._transcription_config.language
+        else:
+            provider_lang = get_display_language_code(source_language)
         language_name = languages[provider_lang].name if provider_lang in languages else provider_lang
 
-        logger.info(f"🎤 Starting {language_name} transcription for participant {participant.identity}, track {track.sid}")
+        # ElevenLabs uses server VAD — each commit is a natural phrase, no accumulation needed
+        use_accumulator = not lang_code.endswith("-eleven")
+
+        logger.info(f"🎤 Starting {language_name} transcription for participant {participant.identity}, track {track.sid} (accumulator={'ON' if use_accumulator else 'OFF (VAD)'})")
 
         try:
             audio_stream = rtc.AudioStream(track)
@@ -475,7 +525,7 @@ async def entrypoint(job: JobContext):
             async with resource_manager.stt_manager.create_stream(stt_provider, participant.identity) as stt_stream:
                 # Create transcription task with tracking
                 stt_task = resource_manager.task_manager.create_task(
-                    _forward_transcription(stt_stream, track),
+                    _forward_transcription(stt_stream, track, use_accumulator=use_accumulator),
                     name=f"transcribe-{participant.identity}",
                     metadata={"participant": participant.identity, "track": track.sid}
                 )
@@ -534,7 +584,7 @@ async def entrypoint(job: JobContext):
             provider = get_or_create_stt_provider(participant_lang)
 
             task = resource_manager.task_manager.create_task(
-                transcribe_track(participant, track, provider),  # Pass language-specific provider
+                transcribe_track(participant, track, provider, lang_code=participant_lang),
                 name=f"track-handler-{participant.identity}",
                 metadata={"participant": participant.identity, "track": track.sid, "language": participant_lang}
             )
