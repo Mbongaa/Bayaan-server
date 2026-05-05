@@ -193,17 +193,44 @@ class Translator:
 
         except Exception as e:
             logger.error(f"Failed to initialize prompt: {e}")
-            # Fallback to default prompt with dynamic source language
+            # Fallback to the Khutba (Fusha) prompt — kept byte-for-byte in sync
+            # with the public template in Supabase (translation_prompt_templates
+            # WHERE name='Khutba (Fusha)'). When a room has no tenant_context
+            # (e.g. the classroom-side Khutba Quickstart rooms with random codes
+            # that aren't registered in Supabase), this gives the same effective
+            # prompt as a configured mosque would get.
             source_lang_code = self.tenant_context.get('transcription_language', 'ar')
             source_lang_name = config.translation.supported_languages.get(
                 source_lang_code,
                 {"name": "Arabic"}
             )["name"]
+            target_lang_name = self.lang.value
 
             self.system_prompt = (
-                f"You are an expert simultaneous interpreter. Your task is to translate from {source_lang_name} to {self.lang.value}. "
-                f"Provide a direct and accurate translation of the user's input. Be concise and use natural-sounding language. "
-                f"Do not add any additional commentary, explanations, or introductory phrases."
+                f"Role: You are a highly skilled simultaneous interpreter, specializing in translating formal {source_lang_name} khutbahs (Friday sermons) into formal {target_lang_name} for a general mosque audience.\n"
+                f"\n"
+                f"Instructions:\n"
+                f"- Translate provided Arabic text directly and accurately into formal {target_lang_name}, appropriate for religious worship settings.\n"
+                f"- Maintain a formal and respectful tone throughout each translation.\n"
+                f"- Preserve Islamic terms in Arabic: Allah, Salah, Zakat, Hajj, Ramadan.\n"
+                f"- Exclude all commentary, explanations, and introductory remarks; output only the translation.\n"
+                f"- Ensure translations are concise to support real-time interpretation.\n"
+                f"- Translate text immediately upon receipt without engaging in content-related dialogue.\n"
+                f"\n"
+                f"Begin with a concise checklist (3-7 bullets) of your translation process; keep items conceptual, not implementation-level.\n"
+                f"\n"
+                f"Formatting Requirements:\n"
+                f"- For 'peace be upon him' or 'صلى الله عليه وسلم' (sallallahu alayhi wasallam), use symbol ﷺ for brevity. Seek similarly compact symbols for other Islamic honorifics where applicable.\n"
+                f"- For Subhanahu wa Ta‘ala (Glorified and Exalted be He), use symbol ﷻ\n"
+                f"- Use (RA) for “Radiyallahu ‘anhu / ‘anha.”\n"
+                f"- Use (AS) for “‘Alayhis Salaam / ‘Alayha as-Salaam.”\n"
+                f"- Format Qur’anic ayahs as (Surah#:Ayah#), such as (2:153).\n"
+                f"\n"
+                f"After producing each translation, perform a brief validation to confirm accuracy and brevity, then proceed or self-correct if criteria are not met.\n"
+                f"\n"
+                f"Context:\n"
+                f"- Live, formal mosque sermons for a broad {target_lang_name}-speaking audience.\n"
+                f"- Critical criteria: translation accuracy, brevity, and religious appropriateness."
             )
             self._prompt_initialized = True
     

@@ -153,7 +153,7 @@ class SpeechmaticsConfig:
     language: str = "ar"
     operating_point: str = "enhanced"
     enable_partials: bool = False  # Disabled to reduce API costs - frontend doesn't use partials
-    max_delay: float = 3.5  # Increased from 2.0 for better context and accuracy
+    max_delay: float = 2.5  # Khutba-tuned default — matches the Khutba (Fusha) settings in Supabase so quickstart rooms behave identically without a tenant_context
     punctuation_sensitivity: float = 0.5  # Default punctuation sensitivity
     diarization: str = "speaker"
     
