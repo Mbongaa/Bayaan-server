@@ -5,7 +5,6 @@ FIXED: Thread-safe connection pool that works with LiveKit's multi-process archi
 """
 import asyncio
 import logging
-import uuid
 from typing import Optional, Dict, Any
 from datetime import datetime
 import aiohttp
@@ -79,70 +78,18 @@ async def ensure_active_session(room_id: int, mosque_id: int) -> Optional[str]:
     3. Returns the session ID or None on failure
     """
     try:
-        # Get session from thread-safe pool
         session = await _pool.get_session()
-        
         async with get_db_headers() as headers:
-            # Check for existing active session
-            url = f"{config.supabase.url}/rest/v1/room_sessions"
-            params = {
-                "room_id": f"eq.{room_id}",
-                "status": "eq.active",
-                "select": "id,started_at",
-                "order": "started_at.desc",
-                "limit": "1"
-            }
-            
-            timeout = aiohttp.ClientTimeout(total=config.supabase.http_timeout)
-            
-            try:
-                async with session.get(url, headers=headers, params=params, timeout=timeout) as response:
-                    if response.status == 200:
-                        sessions = await response.json()
-                        if sessions and len(sessions) > 0:
-                            session_id = sessions[0]["id"]
-                            logger.debug(f"📝 Using existing active session: {session_id}")
-                            return session_id
-                    else:
-                        error_text = await response.text()
-                        logger.warning(f"Failed to check existing sessions: {response.status} - {error_text}")
-            except asyncio.TimeoutError:
-                logger.warning("Timeout checking for existing sessions")
-            except Exception as e:
-                logger.error(f"Error checking sessions: {e}")
-            
-            # Create new session if none exists
-            new_session_id = str(uuid.uuid4())
-            session_data = {
-                "id": new_session_id,
-                "room_id": room_id,
-                "mosque_id": mosque_id,
-                "status": "active",
-                "started_at": datetime.utcnow().isoformat() + "Z",
-                "logging_enabled": True
-            }
-            
-            try:
-                async with session.post(
-                    url,
-                    json=session_data,
-                    headers={**headers, 'Prefer': 'return=minimal'},
-                    timeout=timeout
-                ) as response:
-                    if response.status in [200, 201]:
-                        logger.info(f"📝 Created new session: {new_session_id}")
-                        return new_session_id
-                    else:
-                        error_text = await response.text()
-                        logger.error(f"❌ Failed to create session: {response.status} - {error_text}")
-                        return None
-            except asyncio.TimeoutError:
-                logger.error("Timeout creating new session")
-                return None
-            except Exception as e:
-                logger.error(f"Error creating session: {e}")
-                return None
-                    
+            from database_enhanced import ensure_active_session_atomic
+
+            session_id = await ensure_active_session_atomic(room_id, mosque_id, session, headers)
+            if not session_id:
+                logger.error(
+                    "Atomic session creation failed. Ensure Supabase exposes "
+                    "rpc/ensure_room_session_atomic before production rollout."
+                )
+            return session_id
+
     except Exception as e:
         logger.error(f"❌ Session management failed: {e}")
         return None

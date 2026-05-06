@@ -98,6 +98,137 @@ LanguageCode = Enum(
 # Translator class has been moved to translator.py
 
 
+TrackKey = tuple[str, str]
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        logger.warning(f"Invalid integer for {name}; using default {default}")
+        return default
+
+
+def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
+    try:
+        return max(minimum, float(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        logger.warning(f"Invalid float for {name}; using default {default}")
+        return default
+
+
+def compute_worker_load(worker) -> float:
+    """LiveKit worker load based on active jobs instead of CPU-only defaults."""
+    active_jobs = getattr(worker, "active_jobs", [])
+    try:
+        active_count = len(active_jobs)
+    except TypeError:
+        active_count = 0
+    max_jobs = _env_int("MAX_ACTIVE_JOBS_PER_WORKER", 9)
+    return min(active_count / max_jobs, 1.0)
+
+
+@dataclass
+class TranscriptAccumulator:
+    accumulated_text: str = ""
+    last_final_transcript: str = ""
+    current_sentence_id: Optional[str] = None
+
+    def ensure_sentence_id(self) -> str:
+        if not self.current_sentence_id:
+            self.current_sentence_id = str(uuid.uuid4())
+        return self.current_sentence_id
+
+    def append(self, text: str) -> None:
+        if self.accumulated_text:
+            self.accumulated_text = self.accumulated_text.strip() + " " + text
+        else:
+            self.accumulated_text = text
+
+    def reset(self) -> None:
+        self.accumulated_text = ""
+        self.current_sentence_id = None
+
+
+def collect_translation_segments(
+    accumulator: TranscriptAccumulator,
+    final_text: str,
+    max_accumulated_chars: int,
+) -> list[tuple[str, Optional[str]]]:
+    """Update an accumulator and return segments ready for translation."""
+    accumulator.ensure_sentence_id()
+    accumulator.append(final_text)
+
+    complete_sentences, remaining_text = extract_complete_sentences(accumulator.accumulated_text)
+    translation_segments: list[tuple[str, Optional[str]]] = []
+
+    if complete_sentences and complete_sentences[0] == "PUNCTUATION_COMPLETE":
+        if accumulator.accumulated_text.strip():
+            translation_segments.append((
+                accumulator.accumulated_text,
+                accumulator.current_sentence_id,
+            ))
+            accumulator.reset()
+    elif complete_sentences:
+        for sentence in complete_sentences:
+            sentence_id = (
+                accumulator.current_sentence_id
+                if len(complete_sentences) == 1
+                else str(uuid.uuid4())
+            )
+            translation_segments.append((sentence, sentence_id))
+
+        accumulator.accumulated_text = remaining_text
+        accumulator.current_sentence_id = str(uuid.uuid4()) if remaining_text else None
+
+    if len(accumulator.accumulated_text) > max_accumulated_chars:
+        translation_segments.append((
+            accumulator.accumulated_text,
+            accumulator.current_sentence_id,
+        ))
+        accumulator.reset()
+
+    return translation_segments
+
+
+def cancel_track_state(
+    participant_tasks: Dict[TrackKey, asyncio.Task],
+    transcript_accumulators: Dict[TrackKey, TranscriptAccumulator],
+    participant_id: str,
+    track_id: str,
+) -> Optional[asyncio.Task]:
+    """Cancel and remove state for exactly one participant track."""
+    track_key = (participant_id, track_id)
+    task = participant_tasks.pop(track_key, None)
+    transcript_accumulators.pop(track_key, None)
+    if task and not task.done():
+        task.cancel()
+    return task
+
+
+def cancel_participant_track_states(
+    participant_tasks: Dict[TrackKey, asyncio.Task],
+    transcript_accumulators: Dict[TrackKey, TranscriptAccumulator],
+    participant_id: str,
+) -> list[asyncio.Task]:
+    """Cancel and remove all track state for one participant."""
+    tasks: list[asyncio.Task] = []
+    participant_track_keys = [
+        key for key in list(participant_tasks.keys())
+        if key[0] == participant_id
+    ]
+    for _, track_id in participant_track_keys:
+        task = cancel_track_state(
+            participant_tasks,
+            transcript_accumulators,
+            participant_id,
+            track_id,
+        )
+        if task:
+            tasks.append(task)
+    return tasks
+
+
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load()
 
@@ -109,6 +240,7 @@ async def entrypoint(job: JobContext):
     
     # Initialize resource manager
     resource_manager = ResourceManager()
+    await resource_manager.__aenter__()
     
     # Register heartbeat timeout callback
     async def on_participant_timeout(participant_id: str):
