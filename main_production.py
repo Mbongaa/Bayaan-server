@@ -58,15 +58,11 @@ def main():
     
     try:
         # Import and run the agent directly
-        from livekit.agents import WorkerOptions, cli
-        from main import entrypoint, prewarm, request_fnc
+        from livekit.agents import cli
+        from main import build_worker_options
         
         # Production worker configuration
-        worker_opts = WorkerOptions(
-            entrypoint_fnc=entrypoint,
-            prewarm_fnc=prewarm,
-            request_fnc=request_fnc
-        )
+        worker_opts = build_worker_options()
         
         logger.info("Starting LiveKit CLI with production configuration")
         
@@ -91,12 +87,8 @@ if __name__ == "__main__":
             # Default to original main.py behavior
             from main import *
             # Run with original CLI
-            from livekit.agents import cli, WorkerOptions
-            cli.run_app(WorkerOptions(
-                entrypoint_fnc=entrypoint,
-                prewarm_fnc=prewarm,
-                request_fnc=request_fnc
-            ))
+            from livekit.agents import cli
+            cli.run_app(build_worker_options())
     else:
         # Run the main agent
         main() 

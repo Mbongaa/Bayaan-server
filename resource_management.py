@@ -50,7 +50,8 @@ class TaskManager:
     
     async def __aenter__(self):
         """Context manager entry."""
-        self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
+        if not self._cleanup_task or self._cleanup_task.done():
+            self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -207,30 +208,36 @@ class STTStreamManager:
     def __init__(self):
         self._streams: Set[Any] = set()
         self._stream_metadata: Dict[Any, Dict[str, Any]] = {}
-        self._participant_streams: Dict[str, Any] = {}  # Track active streams per participant
-        self._cleanup_locks: Dict[str, asyncio.Lock] = {}  # Prevent race conditions
+        self._participant_streams: Dict[tuple[str, str], Any] = {}  # (participant, track) -> stream
+        self._cleanup_locks: Dict[tuple[str, str], asyncio.Lock] = {}  # Prevent race conditions
         self._participant_disconnect_times: Dict[str, float] = {}  # Track disconnect times
         self._reconnect_grace_period = 3.0  # seconds to wait before allowing reconnect
         self._stats = ResourceStats()
         logger.info("🎤 STTStreamManager initialized")
     
+    def _stream_key(self, participant_id: str, track_id: Optional[str] = None) -> tuple[str, str]:
+        return (participant_id, track_id or "__default__")
+    
     @asynccontextmanager
-    async def create_stream(self, stt_provider, participant_id: str):
+    async def create_stream(self, stt_provider, participant_id: str, track_id: Optional[str] = None):
         """
         Create and manage an STT stream.
         
         Args:
             stt_provider: STT provider instance
             participant_id: ID of the participant
+            track_id: Optional LiveKit track SID for exact track lifecycle cleanup
             
         Yields:
             STT stream instance
         """
-        # Get or create lock for this participant
-        if participant_id not in self._cleanup_locks:
-            self._cleanup_locks[participant_id] = asyncio.Lock()
+        stream_key = self._stream_key(participant_id, track_id)
         
-        async with self._cleanup_locks[participant_id]:
+        # Get or create lock for this participant track
+        if stream_key not in self._cleanup_locks:
+            self._cleanup_locks[stream_key] = asyncio.Lock()
+        
+        async with self._cleanup_locks[stream_key]:
             # Check for recent disconnect - implement debouncing
             last_disconnect = self._participant_disconnect_times.get(participant_id, 0)
             time_since_disconnect = time.time() - last_disconnect
@@ -240,8 +247,8 @@ class STTStreamManager:
                 logger.warning(f"⏳ Participant {participant_id} reconnecting too quickly. Waiting {wait_time:.1f}s")
                 await asyncio.sleep(wait_time)
             
-            # Check if there's already an active stream for this participant
-            existing_stream = self._participant_streams.get(participant_id)
+            # Check if there's already an active stream for this participant track
+            existing_stream = self._participant_streams.get(stream_key)
             if existing_stream:
                 logger.warning(f"⚠️ Active STT stream already exists for {participant_id}, closing it first")
                 try:
@@ -251,7 +258,7 @@ class STTStreamManager:
                 finally:
                     self._streams.discard(existing_stream)
                     self._stream_metadata.pop(existing_stream, None)
-                    self._participant_streams.pop(participant_id, None)
+                    self._participant_streams.pop(stream_key, None)
             
             stream = None
             try:
@@ -260,9 +267,10 @@ class STTStreamManager:
                 self._streams.add(stream)
                 self._stream_metadata[stream] = {
                     "participant_id": participant_id,
+                    "track_id": track_id,
                     "created_at": datetime.utcnow()
                 }
-                self._participant_streams[participant_id] = stream
+                self._participant_streams[stream_key] = stream
                 self._stats.streams_opened += 1
                 self._stats.active_streams = len(self._streams)
                 
@@ -272,19 +280,26 @@ class STTStreamManager:
             finally:
                 # Cleanup stream
                 if stream:
+                    stream_was_active = (
+                        stream in self._streams or
+                        self._participant_streams.get(stream_key) is stream
+                    )
                     try:
-                        # Force close the stream
-                        await stream.aclose()
-                        logger.info(f"✅ STT stream closed for {participant_id}")
+                        if stream_was_active:
+                            # Force close the stream
+                            await stream.aclose()
+                            logger.info(f"✅ STT stream closed for {participant_id}")
                     except Exception as e:
                         logger.error(f"Error closing STT stream: {e}")
                     finally:
                         self._streams.discard(stream)
                         self._stream_metadata.pop(stream, None)
-                        self._participant_streams.pop(participant_id, None)
+                        if self._participant_streams.get(stream_key) is stream:
+                            self._participant_streams.pop(stream_key, None)
                         # Record disconnect time for debouncing
                         self._participant_disconnect_times[participant_id] = time.time()
-                        self._stats.streams_closed += 1
+                        if stream_was_active:
+                            self._stats.streams_closed += 1
                         self._stats.active_streams = len(self._streams)
     
     async def close_all(self):
@@ -310,30 +325,43 @@ class STTStreamManager:
         self._stats.active_streams = 0
         logger.info("✅ All STT streams closed")
     
-    async def close_participant_stream(self, participant_id: str):
-        """Close a specific participant's stream."""
-        if participant_id not in self._participant_streams:
+    async def close_participant_stream(self, participant_id: str, track_id: Optional[str] = None):
+        """Close a participant stream. If track_id is omitted, close all participant streams."""
+        if track_id is None:
+            keys_to_close = [
+                key for key in list(self._participant_streams.keys())
+                if key[0] == participant_id
+            ]
+        else:
+            keys_to_close = [self._stream_key(participant_id, track_id)]
+        
+        keys_to_close = [key for key in keys_to_close if key in self._participant_streams]
+        if not keys_to_close:
             return
         
-        if participant_id not in self._cleanup_locks:
-            self._cleanup_locks[participant_id] = asyncio.Lock()
-        
-        async with self._cleanup_locks[participant_id]:
-            stream = self._participant_streams.get(participant_id)
-            if stream:
-                logger.info(f"🚫 Closing STT stream for participant {participant_id}")
-                try:
-                    await stream.aclose()
-                except Exception as e:
-                    logger.error(f"Error closing participant stream: {e}")
-                finally:
-                    self._streams.discard(stream)
-                    self._stream_metadata.pop(stream, None)
-                    self._participant_streams.pop(participant_id, None)
-                    # Record disconnect time for debouncing
-                    self._participant_disconnect_times[participant_id] = time.time()
-                    self._stats.streams_closed += 1
-                    self._stats.active_streams = len(self._streams)
+        for stream_key in keys_to_close:
+            if stream_key not in self._cleanup_locks:
+                self._cleanup_locks[stream_key] = asyncio.Lock()
+            
+            async with self._cleanup_locks[stream_key]:
+                stream = self._participant_streams.get(stream_key)
+                if stream:
+                    logger.info(
+                        f"Closing STT stream for participant {participant_id} "
+                        f"track={stream_key[1]}"
+                    )
+                    try:
+                        await stream.aclose()
+                    except Exception as e:
+                        logger.error(f"Error closing participant stream: {e}")
+                    finally:
+                        self._streams.discard(stream)
+                        self._stream_metadata.pop(stream, None)
+                        self._participant_streams.pop(stream_key, None)
+                        # Record disconnect time for debouncing
+                        self._participant_disconnect_times[participant_id] = time.time()
+                        self._stats.streams_closed += 1
+                        self._stats.active_streams = len(self._streams)
     
     def prune_stale_data(self, max_age: float = 300.0):
         """
@@ -347,8 +375,9 @@ class STTStreamManager:
         for pid in stale:
             self._participant_disconnect_times.pop(pid, None)
             # Only remove lock if participant doesn't have an active stream
-            if pid not in self._participant_streams:
-                self._cleanup_locks.pop(pid, None)
+            if not any(key[0] == pid for key in self._participant_streams):
+                for lock_key in [key for key in self._cleanup_locks if key[0] == pid]:
+                    self._cleanup_locks.pop(lock_key, None)
         if stale:
             logger.debug(f"🧹 Pruned stale data for {len(stale)} disconnected participants")
 
@@ -439,6 +468,8 @@ class HeartbeatMonitor:
                 await self._monitor_task
             except asyncio.CancelledError:
                 pass
+        self.participants.clear()
+        self.session_info.clear()
         logger.info("💔 Heartbeat monitoring stopped")
     
     def remove_participant(self, participant_id: str):
@@ -463,8 +494,7 @@ class ResourceManager:
     
     async def __aenter__(self):
         """Context manager entry."""
-        await self.task_manager.__aenter__()
-        await self.heartbeat_monitor.start_monitoring()
+        await self.start()
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -474,6 +504,11 @@ class ResourceManager:
     def add_shutdown_handler(self, handler: Callable):
         """Add a handler to be called on shutdown."""
         self._shutdown_handlers.append(handler)
+    
+    async def start(self):
+        """Start background resource monitoring tasks."""
+        await self.task_manager.__aenter__()
+        await self.heartbeat_monitor.start_monitoring()
     
     async def shutdown(self):
         """Shutdown all managed resources."""

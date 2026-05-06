@@ -95,6 +95,170 @@ LanguageCode = Enum(
 # Translator class has been moved to translator.py
 
 
+TrackKey = tuple[str, str]
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        logger.warning(f"Invalid integer for {name}; using default {default}")
+        return default
+
+
+def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
+    try:
+        return max(minimum, float(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        logger.warning(f"Invalid float for {name}; using default {default}")
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    logger.warning(f"Invalid boolean for {name}; using default {default}")
+    return default
+
+
+def _speechmatics_turn_mode_from_env():
+    mode_name = os.getenv("SPEECHMATICS_TURN_MODE", "fixed").strip().lower()
+    mode_map = {
+        "fixed": TurnDetectionMode.FIXED,
+        "adaptive": TurnDetectionMode.ADAPTIVE,
+        "smart_turn": TurnDetectionMode.SMART_TURN,
+        "smart-turn": TurnDetectionMode.SMART_TURN,
+        "smart": TurnDetectionMode.SMART_TURN,
+        "external": TurnDetectionMode.EXTERNAL,
+    }
+    if mode_name not in mode_map:
+        logger.warning(f"Invalid SPEECHMATICS_TURN_MODE={mode_name}; using fixed")
+        mode_name = "fixed"
+    return mode_name, mode_map[mode_name]
+
+
+def compute_worker_load(worker) -> float:
+    """LiveKit worker load based on active jobs instead of CPU-only defaults."""
+    active_jobs = getattr(worker, "active_jobs", [])
+    try:
+        active_count = len(active_jobs)
+    except TypeError:
+        active_count = 0
+    max_jobs = _env_int("MAX_ACTIVE_JOBS_PER_WORKER", 9)
+    return min(active_count / max_jobs, 1.0)
+
+
+@dataclass
+class TranscriptAccumulator:
+    accumulated_text: str = ""
+    last_final_transcript: str = ""
+    current_sentence_id: Optional[str] = None
+
+    def ensure_sentence_id(self) -> str:
+        if not self.current_sentence_id:
+            self.current_sentence_id = str(uuid.uuid4())
+        return self.current_sentence_id
+
+    def append(self, text: str) -> None:
+        if self.accumulated_text:
+            self.accumulated_text = self.accumulated_text.strip() + " " + text
+        else:
+            self.accumulated_text = text
+
+    def reset(self) -> None:
+        self.accumulated_text = ""
+        self.current_sentence_id = None
+
+
+def collect_translation_segments(
+    accumulator: TranscriptAccumulator,
+    final_text: str,
+    max_accumulated_chars: int,
+) -> list[tuple[str, Optional[str]]]:
+    """
+    Update an accumulator with final transcript text and return segments ready
+    for translation.
+    """
+    accumulator.ensure_sentence_id()
+    accumulator.append(final_text)
+    
+    complete_sentences, remaining_text = extract_complete_sentences(accumulator.accumulated_text)
+    translation_segments: list[tuple[str, Optional[str]]] = []
+    
+    # Handle special punctuation completion signal.
+    if complete_sentences and complete_sentences[0] == "PUNCTUATION_COMPLETE":
+        if accumulator.accumulated_text.strip():
+            translation_segments.append((
+                accumulator.accumulated_text,
+                accumulator.current_sentence_id,
+            ))
+            accumulator.reset()
+    elif complete_sentences:
+        for sentence in complete_sentences:
+            sentence_id = (
+                accumulator.current_sentence_id
+                if len(complete_sentences) == 1
+                else str(uuid.uuid4())
+            )
+            translation_segments.append((sentence, sentence_id))
+        
+        accumulator.accumulated_text = remaining_text
+        accumulator.current_sentence_id = str(uuid.uuid4()) if remaining_text else None
+    
+    if len(accumulator.accumulated_text) > max_accumulated_chars:
+        translation_segments.append((
+            accumulator.accumulated_text,
+            accumulator.current_sentence_id,
+        ))
+        accumulator.reset()
+    
+    return translation_segments
+
+
+def cancel_track_state(
+    participant_tasks: Dict[TrackKey, asyncio.Task],
+    transcript_accumulators: Dict[TrackKey, TranscriptAccumulator],
+    participant_id: str,
+    track_id: str,
+) -> Optional[asyncio.Task]:
+    """Cancel and remove state for exactly one participant track."""
+    track_key = (participant_id, track_id)
+    task = participant_tasks.pop(track_key, None)
+    transcript_accumulators.pop(track_key, None)
+    if task and not task.done():
+        task.cancel()
+    return task
+
+
+def cancel_participant_track_states(
+    participant_tasks: Dict[TrackKey, asyncio.Task],
+    transcript_accumulators: Dict[TrackKey, TranscriptAccumulator],
+    participant_id: str,
+) -> list[asyncio.Task]:
+    """Cancel and remove all track state for one participant."""
+    tasks: list[asyncio.Task] = []
+    participant_track_keys = [
+        key for key in list(participant_tasks.keys())
+        if key[0] == participant_id
+    ]
+    for _, track_id in participant_track_keys:
+        task = cancel_track_state(
+            participant_tasks,
+            transcript_accumulators,
+            participant_id,
+            track_id,
+        )
+        if task:
+            tasks.append(task)
+    return tasks
+
+
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load()
 
@@ -106,6 +270,7 @@ async def entrypoint(job: JobContext):
     
     # Initialize resource manager
     resource_manager = ResourceManager()
+    await resource_manager.__aenter__()
     
     # Register heartbeat timeout callback
     async def on_participant_timeout(participant_id: str):
@@ -285,6 +450,12 @@ async def entrypoint(job: JobContext):
     
     # Create STT configuration with room-specific overrides
     stt_config = config.speechmatics.with_room_settings(room_config)
+    speechmatics_turn_mode_name, speechmatics_turn_mode = _speechmatics_turn_mode_from_env()
+    speechmatics_emit_sentences = _env_bool("SPEECHMATICS_EMIT_SENTENCES", True)
+    speechmatics_disable_vad = _env_bool(
+        "SPEECHMATICS_DISABLE_VAD",
+        speechmatics_turn_mode == TurnDetectionMode.FIXED,
+    )
     
     # Speechmatics 1.4.6 STT — direct kwargs on speechmatics.STT().
     # Verified from actual plugin source (stt.py):
@@ -294,7 +465,10 @@ async def entrypoint(job: JobContext):
     #   - domain: intentionally omitted — concatenates with language (ar-broadcast fails)
     logger.info(f"📋 Speechmatics STT config: lang={stt_config.language}, "
                f"punct_sensitivity={stt_config.punctuation_sensitivity}, "
-               f"max_delay={stt_config.max_delay}s")
+               f"max_delay={stt_config.max_delay}s, "
+               f"turn_mode={speechmatics_turn_mode_name}, "
+               f"emit_sentences={speechmatics_emit_sentences}, "
+               f"disable_vad={speechmatics_disable_vad}")
 
     # Initialize STT providers dictionary for multi-language support
     stt_providers = {}  # language_code -> STT provider
@@ -329,25 +503,25 @@ async def entrypoint(job: JobContext):
                     max_delay=stt_config.max_delay,
                     punctuation_overrides={"sensitivity": stt_config.punctuation_sensitivity},
                     enable_diarization=bool(stt_config.diarization),
-                    # FIXED mode = no VAD, no adaptive — behaves like old 1.2.x RT API
-                    turn_detection_mode=TurnDetectionMode.FIXED,
+                    turn_detection_mode=speechmatics_turn_mode,
                 )
 
-                # Force sentence-based emission like 1.2.x RT API did.
-                # The FIXED preset defaults to emit_sentences=False (VAD-driven).
-                # We override to True so Speechmatics waits for real sentence
-                # boundaries before emitting segments.
+                # Let one build test multiple Speechmatics Voice SDK segmentation modes.
                 original_prepare = provider._prepare_config
                 def _patched_prepare(*args, _orig=original_prepare, **kwargs):
                     config = _orig(*args, **kwargs)
-                    config.speech_segment_config = SpeechSegmentConfig(emit_sentences=True)
-                    config.vad_config = None  # disable VAD
+                    if speechmatics_emit_sentences:
+                        config.speech_segment_config = SpeechSegmentConfig(emit_sentences=True)
+                    if speechmatics_disable_vad:
+                        config.vad_config = None
                     return config
                 provider._prepare_config = _patched_prepare
 
                 stt_providers[language_code] = provider
                 logger.info(f"🆕 Created Speechmatics STT provider for language: {stt_language} "
-                           f"(FIXED mode, emit_sentences=True, no VAD, "
+                           f"(turn_mode={speechmatics_turn_mode_name}, "
+                           f"emit_sentences={speechmatics_emit_sentences}, "
+                           f"disable_vad={speechmatics_disable_vad}, "
                            f"punct_sensitivity={stt_config.punctuation_sensitivity}, "
                            f"max_delay={stt_config.max_delay}s)")
 
@@ -378,13 +552,17 @@ async def entrypoint(job: JobContext):
         dutch_enum = getattr(LanguageCode, 'Dutch')
         translators["nl"] = Translator(job.room, dutch_enum, tenant_context)
     
-    # Sentence accumulation for proper sentence-by-sentence translation
-    accumulated_text = ""  # Accumulates text until we get a complete sentence
-    last_final_transcript = ""  # Keep track of the last final transcript to avoid duplicates
-    current_sentence_id = None  # Track current sentence being built
+    max_accumulated_chars = _env_int("MAX_ACCUMULATED_CHARS", 4000, minimum=200)
+    audio_stream_capacity = _env_int("AUDIO_STREAM_CAPACITY", 100, minimum=1)
+    stt_drain_timeout = _env_float("STT_DRAIN_TIMEOUT_SECONDS", 5.0, minimum=0.1)
+    
+    # Per-track sentence accumulation for proper sentence-by-sentence translation
+    transcript_accumulators: Dict[TrackKey, TranscriptAccumulator] = {}
     
     # Track participant tasks for cleanup
-    participant_tasks = {}  # participant_id -> task
+    participant_tasks: Dict[TrackKey, asyncio.Task] = {}  # (participant_id, track_sid) -> task
+    cleanup_lock = asyncio.Lock()
+    cleanup_started = False
     
     logger.info(f"🚀 Starting entrypoint for room: {job.room.name if job.room else 'unknown'}")
     logger.info(f"🔍 Translators dict ID: {id(translators)}")
@@ -394,6 +572,7 @@ async def entrypoint(job: JobContext):
     async def _forward_transcription(
         stt_stream: stt.SpeechStream,
         track: rtc.Track,
+        track_key: TrackKey,
         use_accumulator: bool = True,
     ):
         """Forward the transcription and log the transcript in the console.
@@ -402,7 +581,7 @@ async def entrypoint(job: JobContext):
             use_accumulator: If True, use sentence-based accumulation (Speechmatics).
                 If False, translate each FINAL_TRANSCRIPT directly (ElevenLabs VAD).
         """
-        nonlocal accumulated_text, last_final_transcript, current_sentence_id
+        accumulator = transcript_accumulators.setdefault(track_key, TranscriptAccumulator())
         
         try:
             async for ev in stt_stream:
@@ -412,8 +591,8 @@ async def entrypoint(job: JobContext):
                     print(" -> ", final_text)
                     logger.info(f"Final Arabic transcript: {final_text}")
 
-                    if final_text and final_text != last_final_transcript:
-                        last_final_transcript = final_text
+                    if final_text and final_text != accumulator.last_final_transcript:
+                        accumulator.last_final_transcript = final_text
                         
                         # Publish final transcription for the original language (Arabic)
                         try:
@@ -435,66 +614,44 @@ async def entrypoint(job: JobContext):
                             logger.error(f"❌ Failed to publish final transcription: {str(e)}")
                         
                         # Generate sentence ID if we don't have one for this sentence
-                        if not current_sentence_id:
-                            current_sentence_id = str(uuid.uuid4())
+                        accumulator.ensure_sentence_id()
                         
                         # Handle translation logic
                         if translators:
                             # ElevenLabs VAD mode: each committed transcript is already
                             # a natural phrase boundary — translate directly, no accumulation.
                             if not use_accumulator:
-                                sentence_id = current_sentence_id or str(uuid.uuid4())
+                                sentence_id = accumulator.ensure_sentence_id()
                                 logger.info(f"🎯 Direct translation (VAD commit): '{final_text}'")
                                 await translate_sentences([final_text], translators, source_language, sentence_id)
-                                current_sentence_id = None
+                                accumulator.reset()
                                 continue
 
-                            # SIMPLE ACCUMULATION LOGIC - ONLY APPEND, NEVER REPLACE
-                            if accumulated_text:
-                                # ALWAYS append new final transcript to existing accumulated text
-                                accumulated_text = accumulated_text.strip() + " " + final_text
-                            else:
-                                # First transcript - start accumulation
-                                accumulated_text = final_text
+                            before_len = len(accumulator.accumulated_text)
+                            translation_segments = collect_translation_segments(
+                                accumulator,
+                                final_text,
+                                max_accumulated_chars,
+                            )
                             
-                            logger.info(f"📝 Updated accumulated Arabic text: '{accumulated_text}'")
+                            if translation_segments:
+                                print(
+                                    f"🎯 Found {len(translation_segments)} complete/flushable "
+                                    f"Arabic segment(s): {[text for text, _ in translation_segments]}"
+                                )
                             
-                            # Extract complete sentences from accumulated text
-                            complete_sentences, remaining_text = extract_complete_sentences(accumulated_text)
-
-                            # Handle special punctuation completion signal
-                            if complete_sentences and complete_sentences[0] == "PUNCTUATION_COMPLETE":
-                                if accumulated_text.strip():
-                                    # Complete the accumulated sentence with this punctuation
-                                    print(f"📝 PUNCTUATION SIGNAL: Completing accumulated text: '{accumulated_text}'")
-
-                                    # Translate the completed sentence (don't include the punctuation marker)
-                                    await translate_sentences([accumulated_text], translators, source_language, current_sentence_id)
-
-                                    # Clear accumulated text as sentence is now complete
-                                    accumulated_text = ""
-                                    current_sentence_id = None
-                                    print(f"📝 Cleared accumulated text after punctuation completion")
-                                else:
-                                    print(f"⚠️ Received punctuation completion signal but no accumulated text")
-                            elif complete_sentences:
-                                # We have complete sentences - translate them immediately
-                                print(f"🎯 Found {len(complete_sentences)} complete Arabic sentences: {complete_sentences}")
-
-                                # Translate each complete sentence
-                                for sentence in complete_sentences:
-                                    sentence_id = current_sentence_id if len(complete_sentences) == 1 else str(uuid.uuid4())
-                                    await translate_sentences([sentence], translators, source_language, sentence_id)
-
-                                # Update accumulated text to only remaining incomplete text
-                                accumulated_text = remaining_text
-                                # Generate new sentence ID for the remaining text
-                                current_sentence_id = str(uuid.uuid4()) if remaining_text else None
-                                print(f"📝 Updated accumulated Arabic text after sentence extraction: '{accumulated_text}'")
+                            for sentence, sentence_id in translation_segments:
+                                if before_len + len(final_text) > max_accumulated_chars:
+                                    logger.warning(
+                                        "Forcing translation flush for track %s after %s chars",
+                                        track_key,
+                                        before_len + len(final_text),
+                                    )
+                                await translate_sentences([sentence], translators, source_language, sentence_id)
                             
                             # Log remaining incomplete text (no delayed translation)
-                            if accumulated_text.strip():
-                                logger.info(f"📝 Incomplete Arabic text remaining: '{accumulated_text}'")
+                            if accumulator.accumulated_text.strip():
+                                logger.info(f"📝 Incomplete Arabic text remaining: '{accumulator.accumulated_text}'")
                                 # Note: Incomplete text will be translated when the next sentence completes
                         else:
                             logger.warning(f"⚠️ No translators available in room {job.room.name}, only {languages[source_language].name} transcription published")
@@ -518,19 +675,22 @@ async def entrypoint(job: JobContext):
 
         logger.info(f"🎤 Starting {language_name} transcription for participant {participant.identity}, track {track.sid} (accumulator={'ON' if use_accumulator else 'OFF (VAD)'})")
 
+        track_key = (participant.identity, track.sid)
+        audio_stream = None
         try:
-            audio_stream = rtc.AudioStream(track)
+            audio_stream = rtc.AudioStream(track, capacity=audio_stream_capacity)
 
             # Use context manager for STT stream with provided provider
-            async with resource_manager.stt_manager.create_stream(stt_provider, participant.identity) as stt_stream:
+            async with resource_manager.stt_manager.create_stream(stt_provider, participant.identity, track.sid) as stt_stream:
                 # Create transcription task with tracking
                 stt_task = resource_manager.task_manager.create_task(
-                    _forward_transcription(stt_stream, track, use_accumulator=use_accumulator),
-                    name=f"transcribe-{participant.identity}",
+                    _forward_transcription(stt_stream, track, track_key, use_accumulator=use_accumulator),
+                    name=f"transcribe-{participant.identity}-{track.sid}",
                     metadata={"participant": participant.identity, "track": track.sid}
                 )
                 
                 frame_count = 0
+                audio_cancelled = False
                 try:
                     async for ev in audio_stream:
                         frame_count += 1
@@ -543,23 +703,73 @@ async def entrypoint(job: JobContext):
                             )
                         stt_stream.push_frame(ev.frame)
                 except asyncio.CancelledError:
+                    audio_cancelled = True
                     logger.debug(f"Audio stream cancelled for {participant.identity}")
-                    raise
                 finally:
                     logger.warning(f"🔇 Audio stream ended for {participant.identity}")
-                
-                # Cancel the transcription task if still running
-                if not stt_task.done():
-                    stt_task.cancel()
                     try:
-                        await stt_task
+                        if hasattr(stt_stream, "end_input"):
+                            stt_stream.end_input()
+                    except Exception as e:
+                        logger.debug(f"Error ending STT input for {participant.identity}: {e}")
+                
+                # Give STT a short drain window after end_input(), then cancel.
+                if not stt_task.done():
+                    try:
+                        await asyncio.wait_for(stt_task, timeout=stt_drain_timeout)
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            f"STT drain timeout for {participant.identity} track {track.sid}; cancelling"
+                        )
+                        stt_task.cancel()
+                        try:
+                            await stt_task
+                        except asyncio.CancelledError:
+                            logger.debug(f"STT task cancelled for {participant.identity}")
                     except asyncio.CancelledError:
                         logger.debug(f"STT task cancelled for {participant.identity}")
-                        
+                
+                if audio_cancelled:
+                    return
+                         
         except Exception as e:
             logger.error(f"❌ Transcription track error for {participant.identity}: {str(e)}")
+        finally:
+            if audio_stream:
+                try:
+                    await audio_stream.aclose()
+                except Exception as e:
+                    logger.debug(f"Error closing audio stream for {participant.identity}: {e}")
+            transcript_accumulators.pop(track_key, None)
+            participant_tasks.pop(track_key, None)
         
         logger.info(f"🧹 Transcription cleanup completed for {participant.identity}")
+
+    def _cancel_track_task(participant_id: str, track_id: str, reason: str):
+        task = cancel_track_state(
+            participant_tasks,
+            transcript_accumulators,
+            participant_id,
+            track_id,
+        )
+        if task:
+            logger.info(f"Cancelling transcription task for {participant_id} track={track_id}: {reason}")
+        
+        async def cleanup_track_stream():
+            try:
+                await resource_manager.stt_manager.close_participant_stream(participant_id, track_id)
+                logger.info(f"Closed STT stream for {participant_id} track={track_id}")
+            except Exception as e:
+                logger.error(f"Error closing STT stream for {participant_id} track={track_id}: {e}")
+        
+        cleanup_coro = cleanup_track_stream()
+        try:
+            resource_manager.task_manager.create_task(
+                cleanup_coro,
+                name=f"cleanup-stt-{participant_id}-{track_id}"
+            )
+        except RuntimeError:
+            asyncio.create_task(cleanup_coro, name=f"cleanup-stt-{participant_id}-{track_id}")
 
     @job.room.on("track_subscribed")
     def on_track_subscribed(
@@ -585,11 +795,11 @@ async def entrypoint(job: JobContext):
 
             task = resource_manager.task_manager.create_task(
                 transcribe_track(participant, track, provider, lang_code=participant_lang),
-                name=f"track-handler-{participant.identity}",
+                name=f"track-handler-{participant.identity}-{track.sid}",
                 metadata={"participant": participant.identity, "track": track.sid, "language": participant_lang}
             )
             # Store task reference for cleanup
-            participant_tasks[participant.identity] = task
+            participant_tasks[(participant.identity, track.sid)] = task
         else:
             logger.info(f"❌ Ignoring non-audio track: {track.kind}")
 
@@ -601,9 +811,22 @@ async def entrypoint(job: JobContext):
     @job.room.on("track_unpublished") 
     def on_track_unpublished(publication: rtc.TrackPublication, participant: rtc.RemoteParticipant):
         logger.info(f"📡 Track unpublished: {publication.kind} from {participant.identity}")
+        if publication.kind == rtc.TrackKind.KIND_AUDIO:
+            _cancel_track_task(participant.identity, publication.sid, "track_unpublished")
+
+    @job.room.on("track_unsubscribed")
+    def on_track_unsubscribed(
+        track: rtc.Track,
+        publication: rtc.TrackPublication,
+        participant: rtc.RemoteParticipant,
+    ):
+        logger.info(f"Track unsubscribed: {track.kind} from {participant.identity} (track: {track.sid})")
+        if track.kind == rtc.TrackKind.KIND_AUDIO:
+            _cancel_track_task(participant.identity, track.sid, "track_unsubscribed")
 
     @job.room.on("participant_connected")
     def on_participant_connected(participant: rtc.RemoteParticipant):
+        nonlocal heartbeat_task
         logger.info(f"👥 Participant connected: {participant.identity}")
         
         # Try to extract metadata from participant if available
@@ -625,7 +848,7 @@ async def entrypoint(job: JobContext):
                         translator.tenant_context = tenant_context
                         
                     # If we got a new session_id and don't have heartbeat task, start it
-                    if participant_metadata.get("session_id") and not heartbeat_task:
+                    if participant_metadata.get("session_id") and (heartbeat_task is None or heartbeat_task.done()):
                         heartbeat_task = resource_manager.task_manager.create_task(
                             update_session_heartbeat_periodic(),
                             name="session-heartbeat",
@@ -640,13 +863,20 @@ async def entrypoint(job: JobContext):
         logger.info(f"👥 Participant disconnected: {participant.identity}")
         
         # Cancel participant's transcription task if it exists
-        if participant.identity in participant_tasks:
-            task = participant_tasks[participant.identity]
-            if not task.done():
-                logger.info(f"🚫 Cancelling transcription task for {participant.identity}")
-                task.cancel()
-            del participant_tasks[participant.identity]
-        
+        participant_track_keys = [
+            key for key in list(participant_tasks.keys())
+            if key[0] == participant.identity
+        ]
+        cancelled_tasks = cancel_participant_track_states(
+            participant_tasks,
+            transcript_accumulators,
+            participant.identity,
+        )
+        for track_key, task in zip(participant_track_keys, cancelled_tasks):
+            logger.info(
+                f"Cancelling transcription task for {participant.identity} "
+                f"track={track_key[1]}"
+            )
         # Remove from heartbeat monitoring
         resource_manager.heartbeat_monitor.remove_participant(participant.identity)
         
@@ -659,10 +889,14 @@ async def entrypoint(job: JobContext):
                 logger.error(f"Error closing STT stream for {participant.identity}: {e}")
         
         # Schedule immediate cleanup
-        resource_manager.task_manager.create_task(
-            cleanup_participant_streams(),
-            name=f"cleanup-stt-{participant.identity}"
-        )
+        cleanup_coro = cleanup_participant_streams()
+        try:
+            resource_manager.task_manager.create_task(
+                cleanup_coro,
+                name=f"cleanup-stt-{participant.identity}"
+            )
+        except RuntimeError:
+            asyncio.create_task(cleanup_coro, name=f"cleanup-stt-{participant.identity}")
         
         # Log current resource statistics
         resource_manager.log_stats()
@@ -739,7 +973,7 @@ async def entrypoint(job: JobContext):
     logger.info(f"📡 Real-time transcription data will be sent via LiveKit publish_transcription")
     
     # Start the heartbeat task after connection
-    if tenant_context.get('session_id'):
+    if tenant_context.get('session_id') and (heartbeat_task is None or heartbeat_task.done()):
         heartbeat_task = resource_manager.task_manager.create_task(
             update_session_heartbeat_periodic(),
             name="session-heartbeat",
@@ -764,6 +998,99 @@ async def entrypoint(job: JobContext):
         languages_list = [asdict(lang) for lang in languages.values()]
         return json.dumps(languages_list)
     
+    async def cleanup_room(
+        reason: str,
+        session_id: Optional[str] = None,
+        disconnect: bool = False,
+    ):
+        """Run idempotent room cleanup for frontend requests and LiveKit disconnects."""
+        nonlocal cleanup_started, heartbeat_task
+        
+        async with cleanup_lock:
+            if cleanup_started:
+                logger.info(f"Cleanup already running; ignoring duplicate request: {reason}")
+                return
+            cleanup_started = True
+        
+        logger.info(f"Starting room cleanup: {reason}")
+        try:
+            resource_manager.log_stats()
+            
+            for track_key, task in list(participant_tasks.items()):
+                participant_tasks.pop(track_key, None)
+                transcript_accumulators.pop(track_key, None)
+                if not task.done():
+                    logger.info(
+                        f"Cancelling transcription task for {track_key[0]} "
+                        f"track={track_key[1]} during room cleanup"
+                    )
+                    task.cancel()
+            
+            if heartbeat_task and not heartbeat_task.done():
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+            
+            translator_count = len(translators)
+            for lang, translator in list(translators.items()):
+                try:
+                    await translator.close()
+                except Exception as e:
+                    logger.error(f"Error closing translator {lang}: {e}")
+            translators.clear()
+            logger.info(f"Closed and cleared {translator_count} translators")
+            
+            stt_count = len(stt_providers)
+            for lang, provider in list(stt_providers.items()):
+                try:
+                    if hasattr(provider, 'aclose'):
+                        await provider.aclose()
+                    elif hasattr(provider, 'close'):
+                        close_result = provider.close()
+                        if asyncio.iscoroutine(close_result):
+                            await close_result
+                except Exception as e:
+                    logger.error(f"Error closing STT provider {lang}: {e}")
+            stt_providers.clear()
+            logger.info(f"Closed and cleared {stt_count} STT providers")
+            
+            await resource_manager.shutdown()
+            
+            session_to_close = session_id or (
+                tenant_context.get('session_id') if tenant_context else None
+            )
+            if session_to_close:
+                try:
+                    await close_room_session(session_to_close)
+                except Exception as e:
+                    logger.error(f"Failed to close room session {session_to_close}: {e}")
+            
+            try:
+                await close_database_connections()
+            except Exception as e:
+                logger.debug(f"Database cleanup error: {e}")
+            
+            import gc
+            gc.collect()
+            
+            transcript_accumulators.clear()
+            participant_tasks.clear()
+            
+            verification = await resource_manager.verify_cleanup_complete()
+            logger.info(f"Final cleanup verification: {verification}")
+            
+            if disconnect and job.room:
+                try:
+                    await job.room.disconnect()
+                except Exception as e:
+                    logger.debug(f"Room disconnect during cleanup failed or was already complete: {e}")
+            
+            logger.info("Room cleanup completed successfully")
+        except Exception as e:
+            logger.error(f"CRITICAL: Room cleanup failed: {e}", exc_info=True)
+    
     @job.room.local_participant.register_rpc_method("request/cleanup")
     async def request_cleanup(data: rtc.RpcInvocationData):
         """Handle cleanup request from frontend"""
@@ -774,15 +1101,17 @@ async def entrypoint(job: JobContext):
             
             logger.info(f"🧹 Cleanup requested by frontend: reason={reason}, session_id={session_id}")
             
-            # Initiate graceful shutdown (tracked task)
-            def _on_graceful_cleanup_done(t):
+            # Initiate cleanup outside ResourceManager so it can shut down managed tasks.
+            def _on_cleanup_done(t):
                 if t.cancelled():
-                    logger.warning("Graceful cleanup task was cancelled")
+                    logger.warning("Cleanup task was cancelled")
                 elif t.exception():
-                    logger.error(f"Graceful cleanup failed: {t.exception()}", exc_info=t.exception())
+                    logger.error(f"Cleanup task failed: {t.exception()}", exc_info=t.exception())
 
-            graceful_task = asyncio.create_task(perform_graceful_cleanup(reason, session_id))
-            graceful_task.add_done_callback(_on_graceful_cleanup_done)
+            cleanup_task = asyncio.create_task(
+                cleanup_room(f"frontend_{reason}", session_id=session_id, disconnect=True)
+            )
+            cleanup_task.add_done_callback(_on_cleanup_done)
             
             return json.dumps({
                 "success": True,
@@ -795,108 +1124,10 @@ async def entrypoint(job: JobContext):
                 "error": str(e)
             })
     
-    async def perform_graceful_cleanup(reason: str, session_id: Optional[str]):
-        """Perform graceful cleanup when requested by frontend"""
-        logger.info(f"🛑 Starting graceful cleanup: {reason}")
-        
-        # Log current resource state
-        resource_manager.log_stats()
-        
-        # If session_id provided, update it in database
-        if session_id and tenant_context.get('room_id'):
-            try:
-                from database import query_database
-                result = await query_database(
-                    "SELECT cleanup_session_idempotent(%s, %s, %s)",
-                    [session_id, f"frontend_{reason}", datetime.utcnow()]
-                )
-                logger.info(f"Session cleanup result: {result}")
-            except Exception as e:
-                logger.error(f"Error updating session: {e}")
-        
-        # Shutdown all resources
-        await resource_manager.shutdown()
-        
-        # Verify cleanup is complete
-        verification = await resource_manager.verify_cleanup_complete()
-        logger.info(f"🔍 Cleanup verification: {verification}")
-        
-        # Disconnect from room (this will trigger on_room_disconnected)
-        await job.room.disconnect()
-        
-        logger.info("✅ Graceful cleanup completed")
-
     @job.room.on("disconnected")
     def on_room_disconnected():
         """Handle room disconnection - cleanup all resources"""
         logger.info("Room disconnected, starting cleanup...")
-
-        async def cleanup():
-            try:
-                # Log final resource statistics
-                resource_manager.log_stats()
-
-                # Cancel heartbeat task first if it exists
-                if heartbeat_task and not heartbeat_task.done():
-                    heartbeat_task.cancel()
-                    try:
-                        await heartbeat_task
-                    except asyncio.CancelledError:
-                        pass
-
-                # CRITICAL: Close all translators and their LLM clients FIRST
-                # Each Translator holds an openai.LLM() with httpx.AsyncClient,
-                # SSL contexts, and connection pools that leak ~200-500KB each
-                translator_count = len(translators)
-                for lang, translator in translators.items():
-                    try:
-                        await translator.close()
-                    except Exception as e:
-                        logger.error(f"Error closing translator {lang}: {e}")
-                translators.clear()
-                logger.info(f"Closed and cleared {translator_count} translators")
-
-                # Close all STT providers (each holds connection state)
-                stt_count = len(stt_providers)
-                for lang, provider in stt_providers.items():
-                    try:
-                        if hasattr(provider, 'aclose'):
-                            await provider.aclose()
-                        elif hasattr(provider, 'close'):
-                            await provider.close()
-                    except Exception as e:
-                        logger.error(f"Error closing STT provider {lang}: {e}")
-                stt_providers.clear()
-                logger.info(f"Closed and cleared {stt_count} STT providers")
-
-                # Shutdown resource manager (cancels all tasks, closes all streams)
-                await resource_manager.shutdown()
-
-                # Close the room session in database
-                try:
-                    session_id = tenant_context.get('session_id') if tenant_context else None
-                    if session_id:
-                        await close_room_session(session_id)
-                except Exception as e:
-                    logger.error(f"Failed to close room session: {e}")
-
-                # Close database connections
-                try:
-                    await close_database_connections()
-                except Exception as e:
-                    logger.debug(f"Database cleanup error: {e}")
-
-                # Force garbage collection to free any remaining cyclic references
-                import gc
-                gc.collect()
-
-                # Final verification
-                verification = await resource_manager.verify_cleanup_complete()
-                logger.info(f"Final cleanup verification: {verification}")
-
-                logger.info("Room cleanup completed successfully")
-            except Exception as e:
-                logger.error(f"CRITICAL: Room cleanup failed: {e}", exc_info=True)
 
         # Store task reference and log failures (cannot await in sync handler)
         def _on_cleanup_done(t):
@@ -905,7 +1136,7 @@ async def entrypoint(job: JobContext):
             elif t.exception():
                 logger.error(f"CRITICAL: Room cleanup task failed: {t.exception()}", exc_info=t.exception())
 
-        cleanup_task = asyncio.create_task(cleanup())
+        cleanup_task = asyncio.create_task(cleanup_room("room_disconnected"))
         cleanup_task.add_done_callback(_on_cleanup_done)
 
 
@@ -919,9 +1150,18 @@ async def request_fnc(req: JobRequest):
     logger.info(f"✅ Accepted job request for room: {req.room.name if req.room else 'unknown'}")
 
 
-if __name__ == "__main__":
-    cli.run_app(
-        WorkerOptions(
-            entrypoint_fnc=entrypoint, prewarm_fnc=prewarm, request_fnc=request_fnc
-        )
+def build_worker_options() -> WorkerOptions:
+    """Build LiveKit worker options with I/O-bound job load control."""
+    return WorkerOptions(
+        entrypoint_fnc=entrypoint,
+        prewarm_fnc=prewarm,
+        request_fnc=request_fnc,
+        load_fnc=compute_worker_load,
+        load_threshold=_env_float("LIVEKIT_LOAD_THRESHOLD", 0.9, minimum=0.01),
+        drain_timeout=1800,
+        shutdown_process_timeout=15,
     )
+
+
+if __name__ == "__main__":
+    cli.run_app(build_worker_options())
