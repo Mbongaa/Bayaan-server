@@ -1,4 +1,4 @@
-# Production Environment Configuration for Bayaan LiveKit Agent
+﻿# Production Environment Configuration for Bayaan LiveKit Agent
 
 # Environment
 ENVIRONMENT=production
@@ -25,10 +25,15 @@ WORKER_TYPE=background
 MAX_WORKERS=2
 IDLE_TIMEOUT=300
 PERSISTENT_MODE=true
+AUDIO_STREAM_CAPACITY=100
+STT_DRAIN_TIMEOUT_SECONDS=5
+MAX_ACCUMULATED_CHARS=4000
+MAX_ACTIVE_JOBS_PER_WORKER=9
+LIVEKIT_LOAD_THRESHOLD=0.9
 
 # Logging Configuration
 LOG_LEVEL=INFO
 
 # Python Configuration
 PYTHONPATH=/app
-PYTHONUNBUFFERED=1 
+PYTHONUNBUFFERED=1

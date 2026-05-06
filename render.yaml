@@ -1,4 +1,4 @@
-services:
+﻿services:
   - type: worker
     name: bayaan-livekit-agent
     env: docker
@@ -23,8 +23,6 @@ services:
         fromSecret: openai_api_key
       - key: SPEECHMATICS_API_KEY
         fromSecret: speechmatics_api_key
-      - key: ELEVEN_API_KEY
-        fromSecret: eleven_api_key
       - key: SUPABASE_URL
         fromSecret: supabase_url
       - key: SUPABASE_SERVICE_ROLE_KEY
@@ -44,4 +42,14 @@ services:
       - key: MAX_WORKERS
         value: "3"
       - key: IDLE_TIMEOUT
-        value: "300" 
+        value: "300"
+      - key: AUDIO_STREAM_CAPACITY
+        value: "100"
+      - key: STT_DRAIN_TIMEOUT_SECONDS
+        value: "5"
+      - key: MAX_ACCUMULATED_CHARS
+        value: "4000"
+      - key: MAX_ACTIVE_JOBS_PER_WORKER
+        value: "9"
+      - key: LIVEKIT_LOAD_THRESHOLD
+        value: "0.9"

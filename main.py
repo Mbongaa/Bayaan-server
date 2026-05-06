@@ -12,6 +12,10 @@ from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass, asdict
 
+# Apply domain support patch BEFORE importing speechmatics
+from speechmatics_domain_patch import patch_speechmatics_for_domain_support
+patch_speechmatics_for_domain_support()
+
 from livekit import rtc
 from livekit.agents import (
     AutoSubscribe,
@@ -23,9 +27,8 @@ from livekit.agents import (
     stt,
     utils,
 )
-from livekit.plugins import silero, speechmatics, elevenlabs
-from livekit.plugins.speechmatics import TurnDetectionMode
-from speechmatics.voice import SpeechSegmentConfig
+from livekit.plugins import silero, speechmatics
+from livekit.plugins.speechmatics.types import TranscriptionConfig
 
 # Import configuration
 from config import get_config, ApplicationConfig
@@ -112,35 +115,6 @@ def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
     except (TypeError, ValueError):
         logger.warning(f"Invalid float for {name}; using default {default}")
         return default
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    normalized = value.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    logger.warning(f"Invalid boolean for {name}; using default {default}")
-    return default
-
-
-def _speechmatics_turn_mode_from_env():
-    mode_name = os.getenv("SPEECHMATICS_TURN_MODE", "fixed").strip().lower()
-    mode_map = {
-        "fixed": TurnDetectionMode.FIXED,
-        "adaptive": TurnDetectionMode.ADAPTIVE,
-        "smart_turn": TurnDetectionMode.SMART_TURN,
-        "smart-turn": TurnDetectionMode.SMART_TURN,
-        "smart": TurnDetectionMode.SMART_TURN,
-        "external": TurnDetectionMode.EXTERNAL,
-    }
-    if mode_name not in mode_map:
-        logger.warning(f"Invalid SPEECHMATICS_TURN_MODE={mode_name}; using fixed")
-        mode_name = "fixed"
-    return mode_name, mode_map[mode_name]
 
 
 def compute_worker_load(worker) -> float:
@@ -450,80 +424,39 @@ async def entrypoint(job: JobContext):
     
     # Create STT configuration with room-specific overrides
     stt_config = config.speechmatics.with_room_settings(room_config)
-    speechmatics_turn_mode_name, speechmatics_turn_mode = _speechmatics_turn_mode_from_env()
-    speechmatics_emit_sentences = _env_bool("SPEECHMATICS_EMIT_SENTENCES", True)
-    speechmatics_disable_vad = _env_bool(
-        "SPEECHMATICS_DISABLE_VAD",
-        speechmatics_turn_mode == TurnDetectionMode.FIXED,
-    )
+
+    # Get domain from room config (default to 'broadcast' for sermons)
+    domain = room_config.get('speechmatics_domain', 'broadcast') if room_config else 'broadcast'
+    logger.info(f"[INFO] Speechmatics domain configured: {domain}")
+
+    # Build TranscriptionConfig parameters with domain support. This is the known-good
+    # Speechmatics 1.2.1 path from the A26 deployment.
+    transcription_params = {
+        "language": stt_config.language,
+        "operating_point": stt_config.operating_point,
+        "enable_partials": stt_config.enable_partials,
+        "max_delay": stt_config.max_delay,
+        "punctuation_overrides": {"sensitivity": stt_config.punctuation_sensitivity},
+        "diarization": stt_config.diarization,
+        "domain": domain,
+    }
     
-    # Speechmatics 1.4.6 STT — direct kwargs on speechmatics.STT().
-    # Verified from actual plugin source (stt.py):
-    #   - include_partials (NOT enable_partials — that's deprecated)
-    #   - punctuation_overrides: {"sensitivity": 0.5} — controls how aggressively
-    #     Speechmatics inserts periods. Without this, it puts a period after every word.
-    #   - domain: intentionally omitted — concatenates with language (ar-broadcast fails)
-    logger.info(f"📋 Speechmatics STT config: lang={stt_config.language}, "
-               f"punct_sensitivity={stt_config.punctuation_sensitivity}, "
-               f"max_delay={stt_config.max_delay}s, "
-               f"turn_mode={speechmatics_turn_mode_name}, "
-               f"emit_sentences={speechmatics_emit_sentences}, "
-               f"disable_vad={speechmatics_disable_vad}")
+    logger.info(f"Creating TranscriptionConfig with domain: {domain}")
 
     # Initialize STT providers dictionary for multi-language support
     stt_providers = {}  # language_code -> STT provider
-
-    def get_display_language_code(code: str) -> str:
-        """Map internal routing code to BCP-47 for publishing. ar-eleven -> ar"""
-        if code.startswith("ar"):
-            return "ar"
-        return code
 
     # Helper function to get or create STT provider for a language
     def get_or_create_stt_provider(language_code: str):
         """Get existing STT provider or create new one for the specified language."""
         if language_code not in stt_providers:
-            if language_code == "ar-eleven":
-                stt_providers[language_code] = elevenlabs.STT(
-                    model_id="scribe_v2_realtime",
-                    language_code="ar",
-                    server_vad={
-                        "min_silence_duration_ms": 500,
-                    },
-                )
-                logger.info("🆕 Created ElevenLabs Scribe v2 realtime STT provider for Arabic (server_vad, 500ms silence)")
-            else:
-                # Direct kwargs — verified against livekit-plugins-speechmatics 1.4.6 source
-                stt_language = get_display_language_code(language_code)
+            lang_params = transcription_params.copy()
+            lang_params["language"] = language_code
 
-                provider = speechmatics.STT(
-                    language=stt_language,
-                    operating_point=stt_config.operating_point,
-                    include_partials=stt_config.enable_partials,
-                    max_delay=stt_config.max_delay,
-                    punctuation_overrides={"sensitivity": stt_config.punctuation_sensitivity},
-                    enable_diarization=bool(stt_config.diarization),
-                    turn_detection_mode=speechmatics_turn_mode,
-                )
-
-                # Let one build test multiple Speechmatics Voice SDK segmentation modes.
-                original_prepare = provider._prepare_config
-                def _patched_prepare(*args, _orig=original_prepare, **kwargs):
-                    config = _orig(*args, **kwargs)
-                    if speechmatics_emit_sentences:
-                        config.speech_segment_config = SpeechSegmentConfig(emit_sentences=True)
-                    if speechmatics_disable_vad:
-                        config.vad_config = None
-                    return config
-                provider._prepare_config = _patched_prepare
-
-                stt_providers[language_code] = provider
-                logger.info(f"🆕 Created Speechmatics STT provider for language: {stt_language} "
-                           f"(turn_mode={speechmatics_turn_mode_name}, "
-                           f"emit_sentences={speechmatics_emit_sentences}, "
-                           f"disable_vad={speechmatics_disable_vad}, "
-                           f"punct_sensitivity={stt_config.punctuation_sensitivity}, "
-                           f"max_delay={stt_config.max_delay}s)")
+            stt_providers[language_code] = speechmatics.STT(
+                transcription_config=TranscriptionConfig(**lang_params)
+            )
+            logger.info(f"Created STT provider for language: {language_code} ({languages[language_code].name if language_code in languages else language_code})")
 
         return stt_providers[language_code]
 
@@ -573,14 +506,8 @@ async def entrypoint(job: JobContext):
         stt_stream: stt.SpeechStream,
         track: rtc.Track,
         track_key: TrackKey,
-        use_accumulator: bool = True,
     ):
-        """Forward the transcription and log the transcript in the console.
-
-        Args:
-            use_accumulator: If True, use sentence-based accumulation (Speechmatics).
-                If False, translate each FINAL_TRANSCRIPT directly (ElevenLabs VAD).
-        """
+        """Forward the transcription and log the transcript in the console."""
         accumulator = transcript_accumulators.setdefault(track_key, TranscriptAccumulator())
         
         try:
@@ -601,7 +528,7 @@ async def entrypoint(job: JobContext):
                                 text=final_text,
                                 start_time=0,
                                 end_time=0,
-                                language=get_display_language_code(source_language),  # BCP-47 code
+                                language=source_language,
                                 final=True,
                             )
                             final_transcription = rtc.Transcription(
@@ -618,15 +545,6 @@ async def entrypoint(job: JobContext):
                         
                         # Handle translation logic
                         if translators:
-                            # ElevenLabs VAD mode: each committed transcript is already
-                            # a natural phrase boundary — translate directly, no accumulation.
-                            if not use_accumulator:
-                                sentence_id = accumulator.ensure_sentence_id()
-                                logger.info(f"🎯 Direct translation (VAD commit): '{final_text}'")
-                                await translate_sentences([final_text], translators, source_language, sentence_id)
-                                accumulator.reset()
-                                continue
-
                             before_len = len(accumulator.accumulated_text)
                             translation_segments = collect_translation_segments(
                                 accumulator,
@@ -661,19 +579,16 @@ async def entrypoint(job: JobContext):
             logger.error(f"STT transcription error: {str(e)}")
             raise
 
-    async def transcribe_track(participant: rtc.RemoteParticipant, track: rtc.Track, stt_provider, lang_code: str = "ar"):
+    async def transcribe_track(participant: rtc.RemoteParticipant, track: rtc.Track, stt_provider):
         """Transcribe audio track using the provided STT provider."""
         # Get language from provider's config
         if hasattr(stt_provider, '_transcription_config'):
             provider_lang = stt_provider._transcription_config.language
         else:
-            provider_lang = get_display_language_code(source_language)
+            provider_lang = source_language
         language_name = languages[provider_lang].name if provider_lang in languages else provider_lang
 
-        # ElevenLabs uses server VAD — each commit is a natural phrase, no accumulation needed
-        use_accumulator = not lang_code.endswith("-eleven")
-
-        logger.info(f"🎤 Starting {language_name} transcription for participant {participant.identity}, track {track.sid} (accumulator={'ON' if use_accumulator else 'OFF (VAD)'})")
+        logger.info(f"Starting {language_name} transcription for participant {participant.identity}, track {track.sid}")
 
         track_key = (participant.identity, track.sid)
         audio_stream = None
@@ -684,7 +599,7 @@ async def entrypoint(job: JobContext):
             async with resource_manager.stt_manager.create_stream(stt_provider, participant.identity, track.sid) as stt_stream:
                 # Create transcription task with tracking
                 stt_task = resource_manager.task_manager.create_task(
-                    _forward_transcription(stt_stream, track, track_key, use_accumulator=use_accumulator),
+                    _forward_transcription(stt_stream, track, track_key),
                     name=f"transcribe-{participant.identity}-{track.sid}",
                     metadata={"participant": participant.identity, "track": track.sid}
                 )
@@ -709,7 +624,9 @@ async def entrypoint(job: JobContext):
                     logger.warning(f"🔇 Audio stream ended for {participant.identity}")
                     try:
                         if hasattr(stt_stream, "end_input"):
-                            stt_stream.end_input()
+                            end_result = stt_stream.end_input()
+                            if asyncio.iscoroutine(end_result):
+                                await end_result
                     except Exception as e:
                         logger.debug(f"Error ending STT input for {participant.identity}: {e}")
                 
@@ -794,7 +711,7 @@ async def entrypoint(job: JobContext):
             provider = get_or_create_stt_provider(participant_lang)
 
             task = resource_manager.task_manager.create_task(
-                transcribe_track(participant, track, provider, lang_code=participant_lang),
+                transcribe_track(participant, track, provider),
                 name=f"track-handler-{participant.identity}-{track.sid}",
                 metadata={"participant": participant.identity, "track": track.sid, "language": participant_lang}
             )

@@ -65,7 +65,6 @@ class TranslationConfig:
         if self.supported_languages is None:
             self.supported_languages = {
                 "ar": {"name": "Arabic", "flag": "🇸🇦"},
-                "ar-eleven": {"name": "Arabic ElevenLabs", "flag": "🇸🇦"},
                 "en": {"name": "English", "flag": "🇬🇧"},
                 "es": {"name": "Spanish", "flag": "🇪🇸"},
                 "fr": {"name": "French", "flag": "🇫🇷"},
@@ -236,7 +235,6 @@ class ApplicationConfig:
         print(f"   Default Languages: {self.translation.default_source_language} → {self.translation.default_target_language}")
         print(f"   Context Window: {'✅ ENABLED' if self.translation.use_context else '❌ DISABLED'} ({self.translation.max_context_pairs} pairs)")
         print(f"   STT Defaults: delay={self.speechmatics.max_delay}s, punctuation={self.speechmatics.punctuation_sensitivity}, partials={'✅' if self.speechmatics.enable_partials else '❌'}")
-        print(f"   ELEVEN_API_KEY: {'✅ SET' if os.getenv('ELEVEN_API_KEY') else '⚠️ NOT SET (ar-eleven option unavailable)'}")
 
 
 # Global configuration instance
