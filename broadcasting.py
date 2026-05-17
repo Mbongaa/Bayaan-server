@@ -90,7 +90,7 @@ async def broadcast_to_displays(
             if success:
                 logger.info(
                     f"📡 LIVE: Sent {message_type} ({language}) via Supabase broadcast: "
-                    f"{text[:50]}{'...' if len(text) > 50 else ''}"
+                    f"chars={len(text)}"
                 )
             else:
                 logger.warning(f"⚠️ Failed to broadcast {message_type} to Supabase")

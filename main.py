@@ -89,6 +89,13 @@ for code, lang_info in config.translation.supported_languages.items():
         flag=lang_info["flag"]
     )
 
+TARGET_ONLY_TRANSLATION_CODES: Set[str] = {"bs", "lb"}
+transcription_languages = {
+    code: language
+    for code, language in languages.items()
+    if code not in TARGET_ONLY_TRANSLATION_CODES
+}
+
 LanguageCode = Enum(
     "LanguageCode",  # Name of the Enum
     {lang.name: code for code, lang in languages.items()},  # Enum entries: name -> code mapping
@@ -128,6 +135,27 @@ def compute_worker_load(worker) -> float:
     return min(active_count / max_jobs, 1.0)
 
 
+def resolve_supported_language(
+    raw_language: Optional[str],
+    fallback_language: str,
+    supported_languages: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Return a supported language code, falling back on invalid input."""
+    language_map = supported_languages if supported_languages is not None else languages
+    fallback = fallback_language if fallback_language in language_map else config.translation.default_source_language
+
+    if raw_language and raw_language in language_map:
+        return raw_language
+
+    if raw_language:
+        logger.warning(
+            "Ignoring unsupported speaking_language=%s; using %s",
+            raw_language,
+            fallback,
+        )
+    return fallback
+
+
 @dataclass
 class TranscriptAccumulator:
     accumulated_text: str = ""
@@ -148,6 +176,93 @@ class TranscriptAccumulator:
     def reset(self) -> None:
         self.accumulated_text = ""
         self.current_sentence_id = None
+
+
+@dataclass
+class TranslationJob:
+    text: str
+    sentence_id: Optional[str]
+    source_language: str
+    track_key: TrackKey
+    translators_snapshot: Dict[str, Any]
+
+
+async def run_translation_job(
+    translation_job: TranslationJob,
+    timeout_seconds: float,
+    translate_func=None,
+) -> bool:
+    """Translate one queued segment with timeout protection."""
+    translate = translate_func or translate_sentences
+    try:
+        await asyncio.wait_for(
+            translate(
+                [translation_job.text],
+                translation_job.translators_snapshot,
+                translation_job.source_language,
+                translation_job.sentence_id,
+            ),
+            timeout=timeout_seconds,
+        )
+        return True
+    except asyncio.TimeoutError:
+        logger.error(
+            "Translation timed out after %.1fs for track=%s sentence_id=%s chars=%s",
+            timeout_seconds,
+            translation_job.track_key,
+            translation_job.sentence_id,
+            len(translation_job.text),
+        )
+        return False
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error(
+            "Queued translation failed for track=%s sentence_id=%s: %s",
+            translation_job.track_key,
+            translation_job.sentence_id,
+            e,
+        )
+        return False
+
+
+async def enqueue_translation_job(
+    translation_queue: asyncio.Queue,
+    translation_job: TranslationJob,
+) -> None:
+    """Enqueue a translation job with bounded backpressure instead of dropping."""
+    if translation_queue.full():
+        logger.warning(
+            "Translation queue full for track=%s; waiting for capacity",
+            translation_job.track_key,
+        )
+    await translation_queue.put(translation_job)
+
+
+async def translation_worker(
+    translation_queue: asyncio.Queue,
+    timeout_seconds: float,
+    translate_func=None,
+) -> None:
+    """Process queued translation jobs in FIFO order."""
+    logger.info("Translation worker started")
+    try:
+        while True:
+            translation_job = await translation_queue.get()
+            try:
+                if translation_job is None:
+                    logger.info("Translation worker received shutdown signal")
+                    return
+                await run_translation_job(
+                    translation_job,
+                    timeout_seconds,
+                    translate_func=translate_func,
+                )
+            finally:
+                translation_queue.task_done()
+    except asyncio.CancelledError:
+        logger.info("Translation worker cancelled")
+        raise
 
 
 def collect_translation_segments(
@@ -326,7 +441,10 @@ async def entrypoint(job: JobContext):
 
                         # Log if custom prompt is present
                         if tenant_context.get('translation_prompt'):
-                            logger.info(f"📝 Custom prompt configured: {tenant_context['translation_prompt'][:60]}...")
+                            logger.info(
+                                "Custom prompt configured: chars=%s",
+                                len(tenant_context['translation_prompt']),
+                            )
 
                         # Try to get active session for this room (only for mosque rooms with numeric ID)
                         if tenant_context['room_id'] and isinstance(tenant_context['room_id'], int):
@@ -461,7 +579,11 @@ async def entrypoint(job: JobContext):
         return stt_providers[language_code]
 
     # Update source language based on room config
-    source_language = config.translation.get_source_language(room_config)
+    source_language = resolve_supported_language(
+        config.translation.get_source_language(room_config),
+        config.translation.default_source_language,
+        transcription_languages,
+    )
     logger.info(f"🗣️ STT configured for {languages[source_language].name} speech recognition")
 
     # Create default STT provider for database-configured language
@@ -488,9 +610,18 @@ async def entrypoint(job: JobContext):
     max_accumulated_chars = _env_int("MAX_ACCUMULATED_CHARS", 4000, minimum=200)
     audio_stream_capacity = _env_int("AUDIO_STREAM_CAPACITY", 100, minimum=1)
     stt_drain_timeout = _env_float("STT_DRAIN_TIMEOUT_SECONDS", 5.0, minimum=0.1)
+    translation_queue_maxsize = _env_int("TRANSLATION_QUEUE_MAXSIZE", 200, minimum=1)
+    translation_timeout = _env_float("TRANSLATION_TIMEOUT_SECONDS", 60.0, minimum=1.0)
+    translation_drain_timeout = _env_float("TRANSLATION_DRAIN_TIMEOUT_SECONDS", 10.0, minimum=0.1)
     
     # Per-track sentence accumulation for proper sentence-by-sentence translation
     transcript_accumulators: Dict[TrackKey, TranscriptAccumulator] = {}
+    translation_queue: asyncio.Queue = asyncio.Queue(maxsize=translation_queue_maxsize)
+    translation_worker_task = resource_manager.task_manager.create_task(
+        translation_worker(translation_queue, translation_timeout),
+        name="translation-worker",
+        metadata={"room": job.room.name if job.room else "unknown"}
+    )
     
     # Track participant tasks for cleanup
     participant_tasks: Dict[TrackKey, asyncio.Task] = {}  # (participant_id, track_sid) -> task
@@ -506,6 +637,7 @@ async def entrypoint(job: JobContext):
         stt_stream: stt.SpeechStream,
         track: rtc.Track,
         track_key: TrackKey,
+        track_language: str,
     ):
         """Forward the transcription and log the transcript in the console."""
         accumulator = transcript_accumulators.setdefault(track_key, TranscriptAccumulator())
@@ -515,8 +647,12 @@ async def entrypoint(job: JobContext):
                 # Only process final transcripts since partials are disabled
                 if ev.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
                     final_text = ev.alternatives[0].text.strip()
-                    print(" -> ", final_text)
-                    logger.info(f"Final Arabic transcript: {final_text}")
+                    print(" -> final transcript chars:", len(final_text))
+                    logger.info(
+                        "Final transcript received: language=%s chars=%s",
+                        track_language,
+                        len(final_text),
+                    )
 
                     if final_text and final_text != accumulator.last_final_transcript:
                         accumulator.last_final_transcript = final_text
@@ -528,7 +664,7 @@ async def entrypoint(job: JobContext):
                                 text=final_text,
                                 start_time=0,
                                 end_time=0,
-                                language=source_language,
+                                language=track_language,
                                 final=True,
                             )
                             final_transcription = rtc.Transcription(
@@ -536,7 +672,11 @@ async def entrypoint(job: JobContext):
                             )
                             await job.room.local_participant.publish_transcription(final_transcription)
                             
-                            logger.info(f"✅ Published final {languages.get(source_language, languages.get('ar')).name} transcription: '{final_text}'")
+                            logger.info(
+                                "Published final %s transcription: chars=%s",
+                                languages.get(track_language, languages.get('ar')).name,
+                                len(final_text),
+                            )
                         except Exception as e:
                             logger.error(f"❌ Failed to publish final transcription: {str(e)}")
                         
@@ -554,8 +694,7 @@ async def entrypoint(job: JobContext):
                             
                             if translation_segments:
                                 print(
-                                    f"🎯 Found {len(translation_segments)} complete/flushable "
-                                    f"Arabic segment(s): {[text for text, _ in translation_segments]}"
+                                    f"🎯 Found {len(translation_segments)} complete/flushable segment(s)"
                                 )
                             
                             for sentence, sentence_id in translation_segments:
@@ -565,27 +704,45 @@ async def entrypoint(job: JobContext):
                                         track_key,
                                         before_len + len(final_text),
                                     )
-                                await translate_sentences([sentence], translators, source_language, sentence_id)
+                                await enqueue_translation_job(
+                                    translation_queue,
+                                    TranslationJob(
+                                        text=sentence,
+                                        sentence_id=sentence_id,
+                                        source_language=track_language,
+                                        track_key=track_key,
+                                        translators_snapshot=dict(translators),
+                                    ),
+                                )
                             
                             # Log remaining incomplete text (no delayed translation)
                             if accumulator.accumulated_text.strip():
-                                logger.info(f"📝 Incomplete Arabic text remaining: '{accumulator.accumulated_text}'")
+                                logger.info(
+                                    "Incomplete source text remaining: language=%s chars=%s",
+                                    track_language,
+                                    len(accumulator.accumulated_text),
+                                )
                                 # Note: Incomplete text will be translated when the next sentence completes
                         else:
-                            logger.warning(f"⚠️ No translators available in room {job.room.name}, only {languages[source_language].name} transcription published")
+                            logger.warning(f"⚠️ No translators available in room {job.room.name}, only {languages[track_language].name} transcription published")
                     else:
                         logger.debug("Empty or duplicate transcription, skipping")
         except Exception as e:
             logger.error(f"STT transcription error: {str(e)}")
             raise
 
-    async def transcribe_track(participant: rtc.RemoteParticipant, track: rtc.Track, stt_provider):
+    async def transcribe_track(
+        participant: rtc.RemoteParticipant,
+        track: rtc.Track,
+        stt_provider,
+        track_language: str,
+    ):
         """Transcribe audio track using the provided STT provider."""
         # Get language from provider's config
         if hasattr(stt_provider, '_transcription_config'):
             provider_lang = stt_provider._transcription_config.language
         else:
-            provider_lang = source_language
+            provider_lang = track_language
         language_name = languages[provider_lang].name if provider_lang in languages else provider_lang
 
         logger.info(f"Starting {language_name} transcription for participant {participant.identity}, track {track.sid}")
@@ -599,9 +756,9 @@ async def entrypoint(job: JobContext):
             async with resource_manager.stt_manager.create_stream(stt_provider, participant.identity, track.sid) as stt_stream:
                 # Create transcription task with tracking
                 stt_task = resource_manager.task_manager.create_task(
-                    _forward_transcription(stt_stream, track, track_key),
+                    _forward_transcription(stt_stream, track, track_key, track_language),
                     name=f"transcribe-{participant.identity}-{track.sid}",
-                    metadata={"participant": participant.identity, "track": track.sid}
+                    metadata={"participant": participant.identity, "track": track.sid, "language": track_language}
                 )
                 
                 frame_count = 0
@@ -699,19 +856,24 @@ async def entrypoint(job: JobContext):
         if track.kind == rtc.TrackKind.KIND_AUDIO:
             # Determine transcription language from participant attributes (priority chain):
             # 1. Participant's speaking_language attribute (teacher's UI selection)
-            # 2. source_language variable (database configuration or attribute update)
+            # 2. source_language variable (database/default room configuration)
             # 3. Default 'ar'
-            participant_lang = participant.attributes.get('speaking_language', source_language)
+            raw_participant_lang = participant.attributes.get('speaking_language')
+            participant_lang = resolve_supported_language(
+                raw_participant_lang,
+                source_language,
+                transcription_languages,
+            )
             language_name = languages[participant_lang].name if participant_lang in languages else participant_lang
 
             logger.info(f"✅ Adding {language_name} transcriber for participant: {participant.identity}")
-            logger.info(f"🔍 Language source: {'participant attribute (speaking_language)' if participant.attributes.get('speaking_language') else 'database/variable'}")
+            logger.info(f"🔍 Language source: {'participant attribute (speaking_language)' if raw_participant_lang else 'database/variable'}")
 
             # Get appropriate STT provider for this language
             provider = get_or_create_stt_provider(participant_lang)
 
             task = resource_manager.task_manager.create_task(
-                transcribe_track(participant, track, provider),
+                transcribe_track(participant, track, provider, participant_lang),
                 name=f"track-handler-{participant.identity}-{track.sid}",
                 metadata={"participant": participant.identity, "track": track.sid, "language": participant_lang}
             )
@@ -758,7 +920,12 @@ async def entrypoint(job: JobContext):
                         "session_id": participant_metadata.get("session_id", tenant_context.get("session_id")),
                         "room_title": participant_metadata.get("room_title", tenant_context.get("room_title"))
                     })
-                    logger.info(f"📋 Updated tenant context from participant metadata: {tenant_context}")
+                    logger.info(
+                        "Updated tenant context from participant metadata: room_id=%s mosque_id=%s session_id=%s",
+                        tenant_context.get("room_id"),
+                        tenant_context.get("mosque_id"),
+                        tenant_context.get("session_id"),
+                    )
                     
                     # Update all translators with new context
                     for translator in translators.values():
@@ -825,27 +992,30 @@ async def entrypoint(job: JobContext):
     ):
         """
         When participant attributes change, handle new translation requests
-        and source language updates.
+        and source language attribute validation.
         """
         logger.info(f"🌍 Participant {participant.identity} attributes changed: {changed_attributes}")
 
         # Check for speaking_language changes (teacher's transcription language)
         speaking_lang = changed_attributes.get("speaking_language", None)
         if speaking_lang:
-            nonlocal source_language
-
-            if speaking_lang != source_language:
-                logger.info(f"🔄 Teacher changed source language: {source_language} → {speaking_lang}")
-                language_name = languages[speaking_lang].name if speaking_lang in languages else speaking_lang
-                logger.info(f"🎤 Participant {participant.identity} (teacher) now speaking in: {language_name}")
-
-                # Update the source language for future transcriptions
-                old_language = source_language
-                source_language = speaking_lang
-
-                logger.info(f"✅ Updated transcription source language from {old_language} to {source_language}")
-                new_language_name = languages[source_language].name if source_language in languages else source_language
-                logger.info(f"📝 New audio tracks will be transcribed in: {new_language_name}")
+            resolved_speaking_lang = resolve_supported_language(
+                speaking_lang,
+                source_language,
+                transcription_languages,
+            )
+            if resolved_speaking_lang != speaking_lang:
+                logger.warning(
+                    "Ignoring unsupported speaking_language update from %s: %s",
+                    participant.identity,
+                    speaking_lang,
+                )
+            elif resolved_speaking_lang != source_language:
+                language_name = languages[resolved_speaking_lang].name
+                logger.info(
+                    f"🎤 Participant {participant.identity} set speaking language to {language_name}; "
+                    "active tracks keep their existing transcription language"
+                )
             else:
                 logger.debug(f"Speaking language unchanged: {speaking_lang}")
 
@@ -949,6 +1119,43 @@ async def entrypoint(job: JobContext):
                     await heartbeat_task
                 except asyncio.CancelledError:
                     pass
+
+            if translation_worker_task and not translation_worker_task.done():
+                try:
+                    await asyncio.wait_for(
+                        translation_queue.join(),
+                        timeout=translation_drain_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Translation queue drain timed out after %.1fs; cancelling worker",
+                        translation_drain_timeout,
+                    )
+                    translation_worker_task.cancel()
+                    try:
+                        await translation_worker_task
+                    except asyncio.CancelledError:
+                        pass
+                else:
+                    try:
+                        translation_queue.put_nowait(None)
+                    except asyncio.QueueFull:
+                        logger.warning("Translation queue full during worker shutdown; cancelling worker")
+                        translation_worker_task.cancel()
+                        try:
+                            await translation_worker_task
+                        except asyncio.CancelledError:
+                            pass
+                    else:
+                        try:
+                            await asyncio.wait_for(translation_worker_task, timeout=1.0)
+                        except asyncio.TimeoutError:
+                            logger.warning("Translation worker did not stop after sentinel; cancelling")
+                            translation_worker_task.cancel()
+                            try:
+                                await translation_worker_task
+                            except asyncio.CancelledError:
+                                pass
             
             translator_count = len(translators)
             for lang, translator in list(translators.items()):
@@ -994,6 +1201,13 @@ async def entrypoint(job: JobContext):
             
             transcript_accumulators.clear()
             participant_tasks.clear()
+            while True:
+                try:
+                    translation_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                else:
+                    translation_queue.task_done()
             
             verification = await resource_manager.verify_cleanup_complete()
             logger.info(f"Final cleanup verification: {verification}")

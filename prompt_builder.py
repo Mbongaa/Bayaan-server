@@ -87,8 +87,7 @@ class PromptBuilder:
                     logger.warning(f"template_variables is not a dict: {type(variables)}, using empty dict")
                     variables = {}
                 logger.info(f"📋 Using prompt template: {template.get('name', 'Unknown')}")
-                logger.info(f"📋 Template text: {prompt[:100]}...")
-                logger.info(f"📋 Template variables from DB: {variables}")
+                logger.info("Prompt template loaded: chars=%s variables=%s", len(prompt), list(variables.keys()))
             else:
                 # Use default prompt
                 prompt = self.DEFAULT_PROMPT
@@ -140,7 +139,7 @@ class PromptBuilder:
                 logger.info(f"✅ Successfully formatted custom prompt template: {template.get('name', 'Unknown')}")
             
             # Log the generated prompt for debugging
-            logger.info(f"Generated prompt: {formatted_prompt}")
+            logger.info("Generated prompt: chars=%s", len(formatted_prompt))
             
             return formatted_prompt
             

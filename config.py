@@ -64,6 +64,8 @@ class TranslationConfig:
     def __post_init__(self):
         if self.supported_languages is None:
             self.supported_languages = {
+                "bs": {"name": "Bosnian", "flag": "\U0001F1E7\U0001F1E6"},
+                "lb": {"name": "Luxembourgish", "flag": "\U0001F1F1\U0001F1FA"},
                 "ar": {"name": "Arabic", "flag": "🇸🇦"},
                 "en": {"name": "English", "flag": "🇬🇧"},
                 "es": {"name": "Spanish", "flag": "🇪🇸"},

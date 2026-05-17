@@ -7,7 +7,7 @@ import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from unittest.mock import patch
 
 from text_processing import extract_complete_sentences
@@ -29,6 +29,7 @@ def load_main_symbols(*names):
     ast.fix_missing_locations(module)
     namespace = {
         "asyncio": asyncio,
+        "Any": Any,
         "dataclass": dataclass,
         "Dict": Dict,
         "extract_complete_sentences": extract_complete_sentences,
@@ -71,6 +72,26 @@ class MainStaticHardeningTests(unittest.TestCase):
         self.assertIn("load_fnc=compute_worker_load", self.source)
         self.assertIn("load_threshold=_env_float", self.source)
         self.assertIn("drain_timeout=1800", self.source)
+
+    def test_translation_queue_replaces_inline_openai_translation(self):
+        forward_start = self.source.index("async def _forward_transcription")
+        forward_end = self.source.index("async def transcribe_track")
+        forward_source = self.source[forward_start:forward_end]
+
+        self.assertIn("TranslationJob", self.source)
+        self.assertIn("translation_worker(translation_queue, translation_timeout)", self.source)
+        self.assertIn("await enqueue_translation_job(", forward_source)
+        self.assertNotIn("await translate_sentences", forward_source)
+        self.assertIn("TRANSLATION_QUEUE_MAXSIZE", self.source)
+        self.assertIn("TRANSLATION_TIMEOUT_SECONDS", self.source)
+        self.assertIn("TRANSLATION_DRAIN_TIMEOUT_SECONDS", self.source)
+
+    def test_source_language_is_bound_to_track_not_mutated_by_attributes(self):
+        self.assertIn("resolve_supported_language", self.source)
+        self.assertIn("_forward_transcription(stt_stream, track, track_key, track_language)", self.source)
+        self.assertIn("language=track_language", self.source)
+        self.assertIn("source_language=track_language", self.source)
+        self.assertNotIn("source_language = speaking_lang", self.source)
 
 
 class MainHelperTests(unittest.IsolatedAsyncioTestCase):
@@ -185,6 +206,87 @@ class MainHelperTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.dict(os.environ, {"MAX_ACTIVE_JOBS_PER_WORKER": "10"}):
             self.assertAlmostEqual(compute_worker_load(Worker()), 0.9)
+
+    def test_resolve_supported_language_falls_back_for_invalid_values(self):
+        namespace = load_main_symbols("resolve_supported_language")
+        resolve_supported_language = namespace["resolve_supported_language"]
+        supported = {"ar": object(), "nl": object(), "en": object()}
+
+        self.assertEqual(resolve_supported_language("en", "ar", supported), "en")
+        self.assertEqual(resolve_supported_language("xx", "ar", supported), "ar")
+        self.assertEqual(resolve_supported_language(None, "nl", supported), "nl")
+
+    async def test_translation_worker_processes_jobs_fifo(self):
+        namespace = load_main_symbols(
+            "TranslationJob",
+            "run_translation_job",
+            "translation_worker",
+        )
+        TranslationJob = namespace["TranslationJob"]
+        translation_worker = namespace["translation_worker"]
+        queue = asyncio.Queue()
+        calls = []
+
+        async def fake_translate(sentences, translators, source_language, sentence_id):
+            calls.append((sentences[0], source_language, sentence_id, list(translators)))
+
+        worker = asyncio.create_task(
+            translation_worker(queue, 1.0, translate_func=fake_translate)
+        )
+        await queue.put(TranslationJob("first", "s1", "ar", ("p", "t1"), {"nl": object()}))
+        await queue.put(TranslationJob("second", "s2", "ar", ("p", "t1"), {"nl": object()}))
+        await queue.put(None)
+        await worker
+
+        self.assertEqual([call[0] for call in calls], ["first", "second"])
+        self.assertEqual([call[2] for call in calls], ["s1", "s2"])
+
+    async def test_translation_timeout_does_not_stop_worker(self):
+        namespace = load_main_symbols(
+            "TranslationJob",
+            "run_translation_job",
+            "translation_worker",
+        )
+        TranslationJob = namespace["TranslationJob"]
+        translation_worker = namespace["translation_worker"]
+        queue = asyncio.Queue()
+        calls = []
+
+        async def fake_translate(sentences, translators, source_language, sentence_id):
+            calls.append(sentences[0])
+            if sentences[0] == "slow":
+                await asyncio.sleep(1)
+
+        worker = asyncio.create_task(
+            translation_worker(queue, 0.01, translate_func=fake_translate)
+        )
+        await queue.put(TranslationJob("slow", "s1", "ar", ("p", "t1"), {"nl": object()}))
+        await queue.put(TranslationJob("fast", "s2", "ar", ("p", "t1"), {"nl": object()}))
+        await queue.put(None)
+        await worker
+
+        self.assertEqual(calls, ["slow", "fast"])
+
+    async def test_enqueue_translation_job_waits_when_queue_is_full(self):
+        namespace = load_main_symbols("TranslationJob", "enqueue_translation_job")
+        TranslationJob = namespace["TranslationJob"]
+        enqueue_translation_job = namespace["enqueue_translation_job"]
+        queue = asyncio.Queue(maxsize=1)
+        first = TranslationJob("first", "s1", "ar", ("p", "t1"), {"nl": object()})
+        second = TranslationJob("second", "s2", "ar", ("p", "t1"), {"nl": object()})
+
+        await enqueue_translation_job(queue, first)
+        put_task = asyncio.create_task(enqueue_translation_job(queue, second))
+        await asyncio.sleep(0)
+
+        self.assertFalse(put_task.done())
+        queued = await queue.get()
+        queue.task_done()
+        self.assertIs(queued, first)
+
+        await asyncio.wait_for(put_task, timeout=1)
+        self.assertIs(await queue.get(), second)
+        queue.task_done()
 
 
 if __name__ == "__main__":

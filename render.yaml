@@ -47,6 +47,12 @@
         value: "100"
       - key: STT_DRAIN_TIMEOUT_SECONDS
         value: "5"
+      - key: TRANSLATION_QUEUE_MAXSIZE
+        value: "200"
+      - key: TRANSLATION_TIMEOUT_SECONDS
+        value: "60"
+      - key: TRANSLATION_DRAIN_TIMEOUT_SECONDS
+        value: "10"
       - key: MAX_ACCUMULATED_CHARS
         value: "4000"
       - key: MAX_ACTIVE_JOBS_PER_WORKER

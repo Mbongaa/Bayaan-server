@@ -32,13 +32,24 @@ async def translate_sentences(
         
     for sentence in sentences:
         if sentence.strip():
-            logger.info(f"🎯 TRANSLATING COMPLETE {source_language.upper()} SENTENCE: '{sentence}'")
-            logger.info(f"📊 Processing sentence for {len(translators)} translators")
+            logger.info(
+                "Translating complete %s sentence: chars=%s translators=%s sentence_id=%s",
+                source_language.upper(),
+                len(sentence),
+                len(translators),
+                sentence_id,
+            )
             
             # Send to all translators concurrently for better performance
             translation_tasks = []
             for lang, translator in translators.items():
-                logger.info(f"📤 Sending complete {source_language.upper()} sentence '{sentence}' to {lang} translator")
+                logger.info(
+                    "Sending %s sentence to %s translator: chars=%s sentence_id=%s",
+                    source_language.upper(),
+                    lang,
+                    len(sentence),
+                    sentence_id,
+                )
                 translation_tasks.append(translator.translate(sentence, sentence_id))
             
             # Execute all translations concurrently
@@ -70,7 +81,7 @@ async def translate_single_sentence(
         if not sentence.strip():
             return None
             
-        logger.debug(f"Translating to {target_language}: '{sentence}'")
+        logger.debug("Translating to %s: chars=%s", target_language, len(sentence))
         result = await translator.translate(sentence, None)
         return result
     except Exception as e:

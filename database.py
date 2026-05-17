@@ -287,7 +287,10 @@ async def query_classroom_by_id(classroom_uuid: str, classroom_config) -> Option
                         logger.info(f"🎓 Classroom translation config: transcription={adapted_data.get('transcription_language')}, context_window={adapted_data.get('context_window_size')}")
 
                         if adapted_data.get('translation_prompt'):
-                            logger.info(f"📝 Classroom has custom prompt: {adapted_data['translation_prompt'][:80]}...")
+                            logger.info(
+                                "Classroom has custom prompt: chars=%s",
+                                len(adapted_data['translation_prompt']),
+                            )
                         else:
                             logger.info(f"📝 Classroom has no custom prompt (will use default)")
 
