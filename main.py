@@ -506,9 +506,18 @@ async def entrypoint(job: JobContext):
         stt_stream: stt.SpeechStream,
         track: rtc.Track,
         track_key: TrackKey,
+        track_language: str,
     ):
-        """Forward the transcription and log the transcript in the console."""
+        """Forward the transcription and log the transcript in the console.
+
+        ``track_language`` is the language the STT provider for this track was
+        created with (teacher's ``speaking_language`` attribute, else the room
+        default). It is the source language for both the published transcription
+        segments and the translator prompts — it must NOT be assumed to be the
+        room-level ``source_language``.
+        """
         accumulator = transcript_accumulators.setdefault(track_key, TranscriptAccumulator())
+        track_language_name = languages[track_language].name if track_language in languages else track_language
         
         try:
             async for ev in stt_stream:
@@ -516,19 +525,19 @@ async def entrypoint(job: JobContext):
                 if ev.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
                     final_text = ev.alternatives[0].text.strip()
                     print(" -> ", final_text)
-                    logger.info(f"Final Arabic transcript: {final_text}")
+                    logger.info(f"Final {track_language_name} transcript: {final_text}")
 
                     if final_text and final_text != accumulator.last_final_transcript:
                         accumulator.last_final_transcript = final_text
                         
-                        # Publish final transcription for the original language (Arabic)
+                        # Publish final transcription in the track's source language
                         try:
                             final_segment = rtc.TranscriptionSegment(
                                 id=utils.misc.shortuuid("SG_"),
                                 text=final_text,
                                 start_time=0,
                                 end_time=0,
-                                language=source_language,
+                                language=track_language,
                                 final=True,
                             )
                             final_transcription = rtc.Transcription(
@@ -536,7 +545,7 @@ async def entrypoint(job: JobContext):
                             )
                             await job.room.local_participant.publish_transcription(final_transcription)
                             
-                            logger.info(f"✅ Published final {languages.get(source_language, languages.get('ar')).name} transcription: '{final_text}'")
+                            logger.info(f"✅ Published final {track_language_name} transcription: '{final_text}'")
                         except Exception as e:
                             logger.error(f"❌ Failed to publish final transcription: {str(e)}")
                         
@@ -555,7 +564,7 @@ async def entrypoint(job: JobContext):
                             if translation_segments:
                                 print(
                                     f"🎯 Found {len(translation_segments)} complete/flushable "
-                                    f"Arabic segment(s): {[text for text, _ in translation_segments]}"
+                                    f"{track_language_name} segment(s): {[text for text, _ in translation_segments]}"
                                 )
                             
                             for sentence, sentence_id in translation_segments:
@@ -565,24 +574,33 @@ async def entrypoint(job: JobContext):
                                         track_key,
                                         before_len + len(final_text),
                                     )
-                                await translate_sentences([sentence], translators, source_language, sentence_id)
+                                await translate_sentences([sentence], translators, track_language, sentence_id)
                             
                             # Log remaining incomplete text (no delayed translation)
                             if accumulator.accumulated_text.strip():
-                                logger.info(f"📝 Incomplete Arabic text remaining: '{accumulator.accumulated_text}'")
+                                logger.info(f"📝 Incomplete {track_language_name} text remaining: '{accumulator.accumulated_text}'")
                                 # Note: Incomplete text will be translated when the next sentence completes
                         else:
-                            logger.warning(f"⚠️ No translators available in room {job.room.name}, only {languages[source_language].name} transcription published")
+                            logger.warning(f"⚠️ No translators available in room {job.room.name}, only {track_language_name} transcription published")
                     else:
                         logger.debug("Empty or duplicate transcription, skipping")
         except Exception as e:
             logger.error(f"STT transcription error: {str(e)}")
             raise
 
-    async def transcribe_track(participant: rtc.RemoteParticipant, track: rtc.Track, stt_provider):
+    async def transcribe_track(
+        participant: rtc.RemoteParticipant,
+        track: rtc.Track,
+        stt_provider,
+        track_language: Optional[str] = None,
+    ):
         """Transcribe audio track using the provided STT provider."""
-        # Get language from provider's config
-        if hasattr(stt_provider, '_transcription_config'):
+        # Resolve the language this track is transcribed in: explicit value from
+        # track_subscribed (participant's speaking_language), else the provider's
+        # own config, else the room default.
+        if track_language:
+            provider_lang = track_language
+        elif hasattr(stt_provider, '_transcription_config'):
             provider_lang = stt_provider._transcription_config.language
         else:
             provider_lang = source_language
@@ -599,9 +617,9 @@ async def entrypoint(job: JobContext):
             async with resource_manager.stt_manager.create_stream(stt_provider, participant.identity, track.sid) as stt_stream:
                 # Create transcription task with tracking
                 stt_task = resource_manager.task_manager.create_task(
-                    _forward_transcription(stt_stream, track, track_key),
+                    _forward_transcription(stt_stream, track, track_key, provider_lang),
                     name=f"transcribe-{participant.identity}-{track.sid}",
-                    metadata={"participant": participant.identity, "track": track.sid}
+                    metadata={"participant": participant.identity, "track": track.sid, "language": provider_lang}
                 )
                 
                 frame_count = 0
@@ -711,7 +729,7 @@ async def entrypoint(job: JobContext):
             provider = get_or_create_stt_provider(participant_lang)
 
             task = resource_manager.task_manager.create_task(
-                transcribe_track(participant, track, provider),
+                transcribe_track(participant, track, provider, participant_lang),
                 name=f"track-handler-{participant.identity}-{track.sid}",
                 metadata={"participant": participant.identity, "track": track.sid, "language": participant_lang}
             )

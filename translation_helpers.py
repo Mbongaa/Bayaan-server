@@ -39,7 +39,9 @@ async def translate_sentences(
             translation_tasks = []
             for lang, translator in translators.items():
                 logger.info(f"📤 Sending complete {source_language.upper()} sentence '{sentence}' to {lang} translator")
-                translation_tasks.append(translator.translate(sentence, sentence_id))
+                translation_tasks.append(
+                    translator.translate(sentence, sentence_id, source_language=source_language)
+                )
             
             # Execute all translations concurrently
             if translation_tasks:

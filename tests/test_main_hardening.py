@@ -73,6 +73,34 @@ class MainStaticHardeningTests(unittest.TestCase):
         self.assertIn("drain_timeout=1800", self.source)
 
 
+    def test_translation_source_language_follows_track_not_room_default(self):
+        """Regression: a Croatian (or any non-Arabic) track must reach the translator
+        with ITS language, not the room-level source_language / 'Arabic'. Otherwise the
+        LLM is told it is translating an Arabic khutbah and refuses non-Arabic input."""
+        forward_start = self.source.index("async def _forward_transcription")
+        forward_end = self.source.index("async def transcribe_track")
+        forward_source = self.source[forward_start:forward_end]
+
+        self.assertIn("track_language: str,", forward_source)
+        self.assertIn("language=track_language,", forward_source)
+        self.assertIn(
+            "await translate_sentences([sentence], translators, track_language, sentence_id)",
+            forward_source,
+        )
+        self.assertNotIn("translate_sentences([sentence], translators, source_language", forward_source)
+        self.assertIn("_forward_transcription(stt_stream, track, track_key, provider_lang)", self.source)
+        self.assertIn("transcribe_track(participant, track, provider, participant_lang)", self.source)
+
+        helpers = (SERVER_DIR / "translation_helpers.py").read_text(encoding="utf-8")
+        self.assertIn("translator.translate(sentence, sentence_id, source_language=source_language)", helpers)
+
+        translator_src = (SERVER_DIR / "translator.py").read_text(encoding="utf-8")
+        self.assertIn("async def _initialize_prompt(self, source_language: Optional[str] = None):", translator_src)
+        self.assertIn("_with_source_language_note", translator_src)
+        self.assertNotIn("Translate provided Arabic text", translator_src)
+        self.assertNotIn("Translate provided Arabic text", (SERVER_DIR / "prompt_builder.py").read_text(encoding="utf-8"))
+
+
 class MainHelperTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_track_state_cancels_one_track_not_another(self):
         namespace = load_main_symbols(
