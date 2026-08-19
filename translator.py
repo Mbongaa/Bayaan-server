@@ -108,22 +108,12 @@ class Translator:
                     # Update statistics
                     self.translation_count += 1
                     
-                    # Log successful translation without emitting sermon text.
-                    logger.info(
-                        "Translated to %s: source_chars=%s target_chars=%s sentence_id=%s",
-                        self.lang.value,
-                        len(message),
-                        len(translated_message),
-                        sentence_id,
-                    )
+                    # Log successful translation
+                    logger.info(f"✅ Translated to {self.lang.value}: '{message}' → '{translated_message}'")
                     
                     return translated_message
                 else:
-                    logger.warning(
-                        "Empty translation result: source_chars=%s sentence_id=%s",
-                        len(message),
-                        sentence_id,
-                    )
+                    logger.warning(f"Empty translation result for: '{message}'")
                     return ""
                     
             except Exception as e:
@@ -141,11 +131,11 @@ class Translator:
                 else:
                     logger.error(
                         f"❌ Translation failed after {max_retries} retries: {e}\n"
-                        f"Message chars: {len(message)}"
+                        f"Message: '{message}'"
                     )
                     
         # If we get here, all retries failed
-        error_msg = f"Translation failed after {max_retries} retries (chars={len(message)})"
+        error_msg = f"Translation failed for '{message}' after {max_retries} retries"
         if last_error:
             error_msg += f": {last_error}"
         
@@ -184,7 +174,7 @@ class Translator:
                         target_language=target_lang_name
                     )
                     logger.info(f"✅ Using direct prompt from database: {source_lang_name} → {target_lang_name}")
-                    logger.info("Direct prompt initialized: chars=%s", len(self.system_prompt))
+                    logger.info(f"📝 Direct prompt: {self.system_prompt[:100]}...")
                     self._prompt_initialized = True
                     return
                 except KeyError as e:
