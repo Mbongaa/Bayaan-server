@@ -6,7 +6,11 @@ livekit-plugins-speechmatics==1.2.1
 livekit-plugins-silero==1.2.1
 
 # AI/ML Dependencies
-openai>=1.0.0
+# openai 3.x (released 2026-08-12) switched from httpx to httpx2; livekit-plugins-openai 1.2.1
+# still `import httpx` and requires openai>=1.84.0. Keep on the 1.x/2.x line (httpx-based) until
+# the livekit plugins are upgraded together with openai.
+openai>=1.84.0,<3
+httpx>=0.23.0,<1
 
 # Web Framework (for health checks)
 fastapi>=0.104.0
