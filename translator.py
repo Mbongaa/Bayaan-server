@@ -4,6 +4,7 @@ Handles real-time translation with context management and error handling.
 """
 import asyncio
 import logging
+import json
 from typing import Optional, Dict, Any, List
 from collections import deque
 from enum import Enum
@@ -161,7 +162,7 @@ class Translator:
     @staticmethod
     def _language_name(code: str) -> str:
         """Human-readable language name for a code (falls back to the code itself)."""
-        return config.translation.supported_languages.get(code, {"name": code})["name"]
+        return config.translation.supported_languages.get(code.lower(), {"name": code})["name"]
 
     @staticmethod
     def _with_source_language_note(prompt: str, source_lang_name: str, target_lang_name: str) -> str:
@@ -333,7 +334,60 @@ class Translator:
         
         return translated_message
 
-    async def _publish_transcription(self, translated_text: str, track: Optional[rtc.Track]) -> None:
+    async def translate_strict(self, message: str, sentence_id: str,
+                               source_language: str) -> str:
+        """Gemini's ordered queue needs an observable translation/delivery result.
+
+        Reuse the production prompt/context builder unchanged. Retry publication
+        with the same caption ID and text, never by generating another translation.
+        The old Speechmatics route continues using translate().
+        """
+        if not message.strip():
+            raise TranslationError('Cannot translate an empty confirmed segment')
+        result = None
+        for attempt in range(3):
+            try:
+                async with asyncio.timeout(25):
+                    result = await self._perform_translation(message, source_language)
+                if not result or not result.strip():
+                    raise TranslationError('GPT returned an empty translation')
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.error_count += 1
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(0.5 * (attempt + 1))
+        caption_id = f'TX_{sentence_id}_{self.lang.value}'
+        for attempt in range(3):
+            try:
+                # This input can span several Google finals. Send its exact
+                # source text so clients do not guess from their latest caption.
+                chunks = [message[index:index + 1500] for index in range(0, len(message), 1500)]
+                for index, chunk in enumerate(chunks):
+                    payload = json.dumps(dict(version=1, translationId=caption_id,
+                        targetLanguage=self.lang.value, sourceLanguage=source_language,
+                        index=index, total=len(chunks), sourceText=chunk), ensure_ascii=False)
+                    await asyncio.wait_for(self.room.local_participant.publish_data(
+                        payload, reliable=True, topic='bayaan.translation.context'), timeout=5)
+                await asyncio.wait_for(self._publish_transcription(
+                    result, None, strict=True, segment_id=caption_id), timeout=5)
+                self.translation_count += 1
+                logger.info('Translated confirmed segment=%s target=%s text=%s',
+                            sentence_id, self.lang.value, result)
+                return result
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.error_count += 1
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(0.5 * (attempt + 1))
+        raise TranslationError('Translation delivery failed')
+
+    async def _publish_transcription(self, translated_text: str, track: Optional[rtc.Track],
+                                     *, strict: bool = False, segment_id: Optional[str] = None) -> None:
         """
         Publish the translation as a transcription to the LiveKit room.
         
@@ -343,7 +397,7 @@ class Translator:
         """
         try:
             segment = rtc.TranscriptionSegment(
-                id=utils.misc.shortuuid("SG_"),
+                id=segment_id or utils.misc.shortuuid("SG_"),
                 text=translated_text,
                 start_time=0,
                 end_time=0,
@@ -359,6 +413,8 @@ class Translator:
             logger.debug(f"📤 Published {self.lang.value} transcription to LiveKit room")
         except Exception as e:
             logger.error(f"Failed to publish transcription: {e}")
+            if strict:
+                raise
             # Don't re-raise - translation was successful even if publishing failed
 
     async def close(self):

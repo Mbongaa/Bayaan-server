@@ -1,5 +1,5 @@
-# Use Python 3.10 as base image
-FROM python:3.10-slim
+# Gemini recovery uses asyncio.timeout (Python 3.11+).
+FROM python:3.11-slim
 
 # Set working directory
 WORKDIR /app
@@ -29,4 +29,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD python -c "import asyncio; import sys; print('Agent is running')" || exit 1
 
 # Default command to run the agent in production mode
-CMD ["python", "main_production.py", "start"] 
+CMD ["python", "main_production.py", "start"]

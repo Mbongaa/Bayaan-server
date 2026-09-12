@@ -123,6 +123,11 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
+*service-account*.json
+*credentials*.json
+/secrets/
 .venv
 env/
 venv/

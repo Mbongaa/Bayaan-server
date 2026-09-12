@@ -1,0 +1,604 @@
+[
+  {
+    "code": "af",
+    "name": "Afrikaans",
+    "hint": "af-ZA",
+    "sourceLanguage": "af",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "am",
+    "name": "Amharic",
+    "hint": "am-ET",
+    "sourceLanguage": "am",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "ar-gemini",
+    "name": "Arabic (Full Dialects)",
+    "hint": "ar-EG",
+    "sourceLanguage": "ar",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "hy",
+    "name": "Armenian",
+    "hint": "hy-AM",
+    "sourceLanguage": "hy",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "as",
+    "name": "Assamese",
+    "hint": "as-IN",
+    "sourceLanguage": "as",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "az",
+    "name": "Azerbaijani",
+    "hint": "az-AZ",
+    "sourceLanguage": "az",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "be",
+    "name": "Belarusian",
+    "hint": "be-BY",
+    "sourceLanguage": "be",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "bn-BD",
+    "name": "Bengali (Bangladesh)",
+    "hint": "bn-BD",
+    "sourceLanguage": "bn",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "bn",
+    "name": "Bengali (India)",
+    "hint": "bn-IN",
+    "sourceLanguage": "bn",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "bs",
+    "name": "Bosnian",
+    "hint": "bs-BA",
+    "sourceLanguage": "bs",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "bg",
+    "name": "Bulgarian",
+    "hint": "bg-BG",
+    "sourceLanguage": "bg",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "rup",
+    "name": "Bulgarian (Aromanian)",
+    "hint": "rup-BG",
+    "sourceLanguage": "rup",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "my",
+    "name": "Burmese",
+    "hint": "my-MM",
+    "sourceLanguage": "my",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "yue",
+    "name": "Cantonese (Traditional)",
+    "hint": "yue-Hant-HK",
+    "sourceLanguage": "yue",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "ca",
+    "name": "Catalan",
+    "hint": "ca-ES",
+    "sourceLanguage": "ca",
+    "readiness": "Supported"
+  },
+  {
+    "code": "ceb",
+    "name": "Cebuano",
+    "hint": "ceb",
+    "sourceLanguage": "ceb",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "km",
+    "name": "Central Khmer",
+    "hint": "km-KH",
+    "sourceLanguage": "km",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "hr",
+    "name": "Croatian",
+    "hint": "hr-HR",
+    "sourceLanguage": "hr",
+    "readiness": "Supported"
+  },
+  {
+    "code": "cs",
+    "name": "Czech",
+    "hint": "cs-CZ",
+    "sourceLanguage": "cs",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "da",
+    "name": "Danish",
+    "hint": "da-DK",
+    "sourceLanguage": "da",
+    "readiness": "Supported"
+  },
+  {
+    "code": "nl",
+    "name": "Dutch",
+    "hint": "nl-NL",
+    "sourceLanguage": "nl",
+    "readiness": "Supported"
+  },
+  {
+    "code": "en-AU",
+    "name": "English (Australia)",
+    "hint": "en-AU",
+    "sourceLanguage": "en",
+    "readiness": "Supported"
+  },
+  {
+    "code": "en-GB",
+    "name": "English (Great Britain)",
+    "hint": "en-GB",
+    "sourceLanguage": "en",
+    "readiness": "Supported"
+  },
+  {
+    "code": "en-IN",
+    "name": "English (India)",
+    "hint": "en-IN",
+    "sourceLanguage": "en",
+    "readiness": "Supported"
+  },
+  {
+    "code": "en",
+    "name": "English (United States)",
+    "hint": "en-US",
+    "sourceLanguage": "en",
+    "readiness": "Supported"
+  },
+  {
+    "code": "et",
+    "name": "Estonian",
+    "hint": "et-EE",
+    "sourceLanguage": "et",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "fa",
+    "name": "Farsi",
+    "hint": "fa-IR",
+    "sourceLanguage": "fa",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "tl",
+    "name": "Filipino",
+    "hint": "fil-PH",
+    "sourceLanguage": "fil",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "fi",
+    "name": "Finnish",
+    "hint": "fi-FI",
+    "sourceLanguage": "fi",
+    "readiness": "Supported"
+  },
+  {
+    "code": "fr",
+    "name": "French",
+    "hint": "fr-FR",
+    "sourceLanguage": "fr",
+    "readiness": "Supported"
+  },
+  {
+    "code": "fr-CA",
+    "name": "French (Canada)",
+    "hint": "fr-CA",
+    "sourceLanguage": "fr",
+    "readiness": "Supported"
+  },
+  {
+    "code": "gl",
+    "name": "Galician",
+    "hint": "gl-ES",
+    "sourceLanguage": "gl",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "ka",
+    "name": "Georgian",
+    "hint": "ka-GE",
+    "sourceLanguage": "ka",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "de",
+    "name": "German",
+    "hint": "de-DE",
+    "sourceLanguage": "de",
+    "readiness": "Supported"
+  },
+  {
+    "code": "el",
+    "name": "Greek",
+    "hint": "el-GR",
+    "sourceLanguage": "el",
+    "readiness": "Supported"
+  },
+  {
+    "code": "gu",
+    "name": "Gujarati",
+    "hint": "gu-IN",
+    "sourceLanguage": "gu",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "ha",
+    "name": "Hausa",
+    "hint": "ha-NG",
+    "sourceLanguage": "ha",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "he",
+    "name": "Hebrew",
+    "hint": "he-IL",
+    "sourceLanguage": "he",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "hi",
+    "name": "Hindi",
+    "hint": "hi-IN",
+    "sourceLanguage": "hi",
+    "readiness": "Supported"
+  },
+  {
+    "code": "hu",
+    "name": "Hungarian",
+    "hint": "hu-HU",
+    "sourceLanguage": "hu",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "is",
+    "name": "Icelandic",
+    "hint": "is-IS",
+    "sourceLanguage": "is",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "id",
+    "name": "Indonesian",
+    "hint": "id-ID",
+    "sourceLanguage": "id",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "it",
+    "name": "Italian",
+    "hint": "it-IT",
+    "sourceLanguage": "it",
+    "readiness": "Supported"
+  },
+  {
+    "code": "ja",
+    "name": "Japanese",
+    "hint": "ja-JP",
+    "sourceLanguage": "ja",
+    "readiness": "Supported"
+  },
+  {
+    "code": "jv",
+    "name": "Javanese",
+    "hint": "jv-ID",
+    "sourceLanguage": "jv",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "kea",
+    "name": "Kabuverdianu",
+    "hint": "kea-CV",
+    "sourceLanguage": "kea",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "kn",
+    "name": "Kannada",
+    "hint": "kn-IN",
+    "sourceLanguage": "kn",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "kk",
+    "name": "Kazakh",
+    "hint": "kk-KZ",
+    "sourceLanguage": "kk",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "ko",
+    "name": "Korean",
+    "hint": "ko-KR",
+    "sourceLanguage": "ko",
+    "readiness": "Supported"
+  },
+  {
+    "code": "ky",
+    "name": "Kyrgyz",
+    "hint": "ky-KG",
+    "sourceLanguage": "ky",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "lv",
+    "name": "Latvian",
+    "hint": "lv-LV",
+    "sourceLanguage": "lv",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "ln",
+    "name": "Lingala",
+    "hint": "ln-CD",
+    "sourceLanguage": "ln",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "lt",
+    "name": "Lithuanian",
+    "hint": "lt-LT",
+    "sourceLanguage": "lt",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "mk",
+    "name": "Macedonian",
+    "hint": "mk-MK",
+    "sourceLanguage": "mk",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "ms",
+    "name": "Malay",
+    "hint": "ms-MY",
+    "sourceLanguage": "ms",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "ml",
+    "name": "Malayalam",
+    "hint": "ml-IN",
+    "sourceLanguage": "ml",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "mt",
+    "name": "Maltese",
+    "hint": "mt-MT",
+    "sourceLanguage": "mt",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "cmn",
+    "name": "Mandarin Chinese (Simplified)",
+    "hint": "cmn-Hans-CN",
+    "sourceLanguage": "cmn",
+    "readiness": "Supported"
+  },
+  {
+    "code": "mr",
+    "name": "Marathi",
+    "hint": "mr-IN",
+    "sourceLanguage": "mr",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "mn",
+    "name": "Mongolian",
+    "hint": "mn-MN",
+    "sourceLanguage": "mn",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "ne",
+    "name": "Nepali",
+    "hint": "ne-NP",
+    "sourceLanguage": "ne",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "no",
+    "name": "Norwegian",
+    "hint": "nb-NO",
+    "sourceLanguage": "nb",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "or",
+    "name": "Oriya",
+    "hint": "or-IN",
+    "sourceLanguage": "or",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "pl",
+    "name": "Polish",
+    "hint": "pl-PL",
+    "sourceLanguage": "pl",
+    "readiness": "Supported"
+  },
+  {
+    "code": "pt",
+    "name": "Portuguese (Brazil)",
+    "hint": "pt-BR",
+    "sourceLanguage": "pt",
+    "readiness": "Supported"
+  },
+  {
+    "code": "pt-PT",
+    "name": "Portuguese (Portugal)",
+    "hint": "pt-PT",
+    "sourceLanguage": "pt",
+    "readiness": "Supported"
+  },
+  {
+    "code": "pa",
+    "name": "Punjabi",
+    "hint": "pa-IN",
+    "sourceLanguage": "pa",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "pa-Guru-IN",
+    "name": "Punjabi (Gurmukhi script)",
+    "hint": "pa-Guru-IN",
+    "sourceLanguage": "pa",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "ro",
+    "name": "Romanian",
+    "hint": "ro-RO",
+    "sourceLanguage": "ro",
+    "readiness": "Supported"
+  },
+  {
+    "code": "ru",
+    "name": "Russian",
+    "hint": "ru-RU",
+    "sourceLanguage": "ru",
+    "readiness": "Supported"
+  },
+  {
+    "code": "sr",
+    "name": "Serbian",
+    "hint": "sr-RS",
+    "sourceLanguage": "sr",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "sd",
+    "name": "Sindhi (Arabic script)",
+    "hint": "sd-Arab-IN",
+    "sourceLanguage": "sd",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "sk",
+    "name": "Slovak",
+    "hint": "sk-SK",
+    "sourceLanguage": "sk",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "sl",
+    "name": "Slovenian",
+    "hint": "sl-SI",
+    "sourceLanguage": "sl",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "es",
+    "name": "Spanish (Latin America)",
+    "hint": "es-419",
+    "sourceLanguage": "es",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "es-ES",
+    "name": "Spanish (Spain)",
+    "hint": "es-ES",
+    "sourceLanguage": "es",
+    "readiness": "Supported"
+  },
+  {
+    "code": "es-US",
+    "name": "Spanish (United States)",
+    "hint": "es-US",
+    "sourceLanguage": "es",
+    "readiness": "Supported"
+  },
+  {
+    "code": "sw",
+    "name": "Swahili (Kenya)",
+    "hint": "sw-KE",
+    "sourceLanguage": "sw",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "sv",
+    "name": "Swedish",
+    "hint": "sv-SE",
+    "sourceLanguage": "sv",
+    "readiness": "Supported"
+  },
+  {
+    "code": "tg",
+    "name": "Tajik",
+    "hint": "tg-TJ",
+    "sourceLanguage": "tg",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "te",
+    "name": "Telugu",
+    "hint": "te-IN",
+    "sourceLanguage": "te",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "th",
+    "name": "Thai",
+    "hint": "th-TH",
+    "sourceLanguage": "th",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "tr",
+    "name": "Turkish",
+    "hint": "tr-TR",
+    "sourceLanguage": "tr",
+    "readiness": "Supported"
+  },
+  {
+    "code": "uk",
+    "name": "Ukrainian",
+    "hint": "uk-UA",
+    "sourceLanguage": "uk",
+    "readiness": "Supported"
+  },
+  {
+    "code": "uz",
+    "name": "Uzbek",
+    "hint": "uz-UZ",
+    "sourceLanguage": "uz",
+    "readiness": "Experimental"
+  },
+  {
+    "code": "vi",
+    "name": "Vietnamese",
+    "hint": "vi-VN",
+    "sourceLanguage": "vi",
+    "readiness": "Supported"
+  }
+]

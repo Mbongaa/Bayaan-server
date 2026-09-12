@@ -121,6 +121,11 @@ class TranslationConfig:
                 "vi": {"name": "Vietnamese", "flag": "🇻🇳"},
                 "cy": {"name": "Welsh", "flag": "🏴"},
             }
+            # Source locales also need human-readable GPT prompt names. Existing
+            # production language names take precedence, including plain Arabic.
+            from language_routing import source_language_names
+            for code, info in source_language_names().items():
+                self.supported_languages.setdefault(code, info)
     
     def get_target_language(self, room_config: Optional[Dict[str, any]] = None) -> str:
         """Get target language from room config or use default."""

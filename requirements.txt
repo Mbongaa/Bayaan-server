@@ -5,6 +5,11 @@ livekit-plugins-openai==1.2.1
 livekit-plugins-speechmatics==1.2.1
 livekit-plugins-silero==1.2.1
 
+# Gemini hybrid transcription; keep the existing LiveKit/Speechmatics versions.
+google-genai==2.22.0
+google-auth[requests]>=2.49,<3
+langcodes[data]>=3.5,<4
+
 # AI/ML Dependencies
 # openai 3.x (released 2026-08-12) switched from httpx to httpx2; livekit-plugins-openai 1.2.1
 # still `import httpx` and requires openai>=1.84.0. Keep on the 1.x/2.x line (httpx-based) until

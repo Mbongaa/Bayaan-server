@@ -1,0 +1,17 @@
+.git
+.venv
+venv
+__pycache__
+**/__pycache__
+*.pyc
+.env
+.env.*
+!.env.example
+*service-account*.json
+*credentials*.json
+secrets
+*.log
+tests
+local_preview.py
+LOCAL_PREVIEW.md
+backup_*

@@ -49,6 +49,7 @@ from translation_helpers import translate_sentences
 
 # Import Translator class
 from translator import Translator
+from language_routing import transcription_route, translation_language
 
 # Import resource management
 from resource_management import ResourceManager, TaskManager, STTStreamManager
@@ -235,6 +236,8 @@ def cancel_participant_track_states(
 
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load()
+    from gemini_prewarm import prewarm_gemini
+    prewarm_gemini()
 
 
 async def entrypoint(job: JobContext):
@@ -353,9 +356,13 @@ async def entrypoint(job: JobContext):
                 logger.info(f"🏢 Tenant context from webhook handler: mosque_id={tenant_context.get('mosque_id')}, room_id={tenant_context.get('room_id')}")
         
         # Fallback to room metadata if available
-        if not tenant_context and job.room and job.room.metadata:
+        # Agents 1.2.1 sets only the RTC room name before connect. The assignment
+        # room already carries metadata; keep database/webhook precedence.
+        room_metadata = (job.room.metadata if job.room else '') or getattr(
+            getattr(getattr(job, 'job', None), 'room', None), 'metadata', '')
+        if not tenant_context and room_metadata:
             try:
-                metadata = json.loads(job.room.metadata)
+                metadata = json.loads(room_metadata)
                 tenant_context = {
                     "room_id": metadata.get("room_id"),
                     "mosque_id": metadata.get("mosque_id"),
@@ -363,6 +370,7 @@ async def entrypoint(job: JobContext):
                     "room_title": metadata.get("room_title"),
                     "transcription_language": metadata.get("transcription_language", "ar"),
                     "translation_language": metadata.get("translation_language", "nl"),
+                    "context_window_size": metadata.get("context_window_size", 12),
                     "created_at": metadata.get("created_at")
                 }
                 logger.info(f"🏢 Tenant context from room metadata: mosque_id={tenant_context.get('mosque_id')}, room_id={tenant_context.get('room_id')}")
@@ -395,7 +403,7 @@ async def entrypoint(job: JobContext):
     
     # Configure Speechmatics STT with room-specific settings
     # Use tenant_context which already has room configuration
-    room_config = None
+    room_config = tenant_context or None
     if tenant_context and tenant_context.get('room_id'):
         # We already have the room data in tenant_context from earlier query
         room_config = tenant_context
@@ -450,40 +458,57 @@ async def entrypoint(job: JobContext):
     def get_or_create_stt_provider(language_code: str):
         """Get existing STT provider or create new one for the specified language."""
         if language_code not in stt_providers:
-            lang_params = transcription_params.copy()
-            lang_params["language"] = language_code
-
-            stt_providers[language_code] = speechmatics.STT(
-                transcription_config=TranscriptionConfig(**lang_params)
-            )
+            route = transcription_route(language_code)
+            if route.provider == 'gemini':
+                from gemini_transcription import create_gemini_provider
+                stt_providers[language_code] = create_gemini_provider(
+                    language=language_code, language_hint=route.hint)
+            else:
+                lang_params = transcription_params.copy()
+                lang_params["language"] = route.hint
+                stt_providers[language_code] = speechmatics.STT(
+                    transcription_config=TranscriptionConfig(**lang_params)
+                )
             logger.info(f"Created STT provider for language: {language_code} ({languages[language_code].name if language_code in languages else language_code})")
 
         return stt_providers[language_code]
 
     # Update source language based on room config
     source_language = config.translation.get_source_language(room_config)
-    logger.info(f"🗣️ STT configured for {languages[source_language].name} speech recognition")
+    logger.info("STT configured for %s via %s", source_language, transcription_route(source_language).provider)
 
     # Create default STT provider for database-configured language
     default_stt_provider = get_or_create_stt_provider(source_language)
     
     translators = {}
+
+    def ensure_translator(code):
+        target = translation_language(code, config.translation.supported_languages)
+        if target.value not in translators:
+            translators[target.value] = Translator(job.room, target, tenant_context)
+            languages.setdefault(target.value, Language(target.value, target.name, ''))
+        return translators[target.value]
+
+    # One ordered context history per target, including simultaneous speaker tracks.
+    translation_lock = asyncio.Lock()
+
+    async def translate_confirmed(text, sentence_id, language):
+        async with translation_lock:
+            if transcription_route(language).provider == 'gemini':
+                results = await asyncio.gather(*(translator.translate_strict(text, sentence_id, language)
+                    for translator in list(translators.values())), return_exceptions=True)
+                failures = [result for result in results if isinstance(result, BaseException)]
+                if failures:
+                    raise RuntimeError('A confirmed Gemini segment could not be translated or delivered') from failures[0]
+            else:
+                await translate_sentences([text], dict(translators), language, sentence_id)
     
     # Get target language from room config or use default
     target_language = config.translation.get_target_language(room_config)
     logger.info(f"🎯 Target language resolved to: '{target_language}' (from room_config: {room_config.get('translation_language') if room_config else 'None'} or {room_config.get('translation__language') if room_config else 'None'})")
     
     # Create translator for the configured target language
-    if target_language in languages:
-        # Get language enum dynamically
-        lang_info = languages[target_language]
-        lang_enum = getattr(LanguageCode, lang_info.name)
-        translators[target_language] = Translator(job.room, lang_enum, tenant_context)
-        logger.info(f"📝 Initialized {lang_info.name} translator ({target_language})")
-    else:
-        logger.warning(f"⚠️ Target language '{target_language}' not supported, falling back to Dutch")
-        dutch_enum = getattr(LanguageCode, 'Dutch')
-        translators["nl"] = Translator(job.room, dutch_enum, tenant_context)
+    ensure_translator(target_language)
     
     max_accumulated_chars = _env_int("MAX_ACCUMULATED_CHARS", 4000, minimum=200)
     audio_stream_capacity = _env_int("AUDIO_STREAM_CAPACITY", 100, minimum=1)
@@ -494,12 +519,13 @@ async def entrypoint(job: JobContext):
     
     # Track participant tasks for cleanup
     participant_tasks: Dict[TrackKey, asyncio.Task] = {}  # (participant_id, track_sid) -> task
+    draining_tasks: Set[asyncio.Task] = set()
     cleanup_lock = asyncio.Lock()
-    cleanup_started = False
+    shared_cleanup_task: Optional[asyncio.Task] = None
     
     logger.info(f"🚀 Starting entrypoint for room: {job.room.name if job.room else 'unknown'}")
     logger.info(f"🔍 Translators dict ID: {id(translators)}")
-    logger.info(f"🎯 Configuration: {languages[source_language].name} → {languages.get(target_language, languages['nl']).name}")
+    logger.info("Configuration: %s -> %s", source_language, target_language)
     logger.info(f"⚙️ STT Settings: delay={stt_config.max_delay}s, punctuation={stt_config.punctuation_sensitivity}")
 
     async def _forward_transcription(
@@ -574,7 +600,7 @@ async def entrypoint(job: JobContext):
                                         track_key,
                                         before_len + len(final_text),
                                     )
-                                await translate_sentences([sentence], translators, track_language, sentence_id)
+                                await translate_confirmed(sentence, sentence_id, track_language)
                             
                             # Log remaining incomplete text (no delayed translation)
                             if accumulator.accumulated_text.strip():
@@ -609,6 +635,41 @@ async def entrypoint(job: JobContext):
         logger.info(f"Starting {language_name} transcription for participant {participant.identity}, track {track.sid}")
 
         track_key = (participant.identity, track.sid)
+        if transcription_route(provider_lang).provider == 'gemini':
+            from gemini_track import run_gemini_track
+
+            async def publish_gemini(segment_id, text, language, final):
+                # Existing classroom consumers classify captions by this exact
+                # selection token. In particular ar-gemini stays distinct from ar.
+                segment = rtc.TranscriptionSegment(id=segment_id, text=text,
+                    start_time=0, end_time=0, language=language, final=final)
+                await job.room.local_participant.publish_transcription(
+                    rtc.Transcription(job.room.local_participant.identity, '', [segment]))
+
+            async def heartbeat():
+                await resource_manager.heartbeat_monitor.update_heartbeat(
+                    participant.identity, tenant_context.get('session_id'))
+
+            try:
+                await run_gemini_track(participant=participant, track=track,
+                    provider=stt_provider, publish=publish_gemini,
+                    translate=translate_confirmed, heartbeat=heartbeat)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception('Gemini track failed participant=%s track=%s', participant.identity, track.sid)
+                try:
+                    await asyncio.wait_for(job.room.local_participant.publish_data(json.dumps({
+                        'state': 'error', 'message': 'Transcription or translation stopped. Leave and rejoin the room to reconnect.',
+                        'sourceParticipantIdentity': participant.identity, 'trackSid': track.sid,
+                    }), reliable=True, topic='bayaan.transcription.status'), timeout=3)
+                except Exception:
+                    logger.warning('Could not deliver transcription failure status')
+                raise
+            finally:
+                if participant_tasks.get(track_key) is asyncio.current_task():
+                    participant_tasks.pop(track_key, None)
+            return
         audio_stream = None
         try:
             audio_stream = rtc.AudioStream(track, capacity=audio_stream_capacity)
@@ -688,6 +749,8 @@ async def entrypoint(job: JobContext):
             track_id,
         )
         if task:
+            draining_tasks.add(task)
+            task.add_done_callback(draining_tasks.discard)
             logger.info(f"Cancelling transcription task for {participant_id} track={track_id}: {reason}")
         
         async def cleanup_track_stream():
@@ -726,7 +789,11 @@ async def entrypoint(job: JobContext):
             logger.info(f"🔍 Language source: {'participant attribute (speaking_language)' if participant.attributes.get('speaking_language') else 'database/variable'}")
 
             # Get appropriate STT provider for this language
-            provider = get_or_create_stt_provider(participant_lang)
+            try:
+                provider = get_or_create_stt_provider(participant_lang)
+            except ValueError as error:
+                logger.error('Cannot start transcription: %s', error)
+                return
 
             task = resource_manager.task_manager.create_task(
                 transcribe_track(participant, track, provider, participant_lang),
@@ -763,6 +830,12 @@ async def entrypoint(job: JobContext):
     def on_participant_connected(participant: rtc.RemoteParticipant):
         nonlocal heartbeat_task
         logger.info(f"👥 Participant connected: {participant.identity}")
+        requested_target = participant.attributes.get('captions_language')
+        if requested_target and requested_target != 'off':
+            try:
+                ensure_translator(requested_target)
+            except ValueError:
+                logger.warning('Ignoring invalid requested translation language')
         
         # Try to extract metadata from participant if available
         if hasattr(participant, 'metadata') and participant.metadata:
@@ -807,6 +880,9 @@ async def entrypoint(job: JobContext):
             transcript_accumulators,
             participant.identity,
         )
+        for task in cancelled_tasks:
+            draining_tasks.add(task)
+            task.add_done_callback(draining_tasks.discard)
         for track_key, task in zip(participant_track_keys, cancelled_tasks):
             logger.info(
                 f"Cancelling transcription task for {participant.identity} "
@@ -851,6 +927,11 @@ async def entrypoint(job: JobContext):
         speaking_lang = changed_attributes.get("speaking_language", None)
         if speaking_lang:
             nonlocal source_language
+            try:
+                transcription_route(speaking_lang)
+            except ValueError:
+                logger.warning('Ignoring invalid transcription language selection')
+                return
 
             if speaking_lang != source_language:
                 logger.info(f"🔄 Teacher changed source language: {source_language} → {speaking_lang}")
@@ -869,20 +950,23 @@ async def entrypoint(job: JobContext):
 
         # Check for captions_language changes (student's translation language)
         lang = changed_attributes.get("captions_language", None)
-        if lang:
+        if lang and lang != 'off':
             if lang == source_language:
-                logger.info(f"✅ Participant {participant.identity} requested {languages[source_language].name} (source language - Arabic)")
+                logger.info('Participant requested source language %s', source_language)
             elif lang in translators:
                 logger.info(f"✅ Participant {participant.identity} requested existing language: {lang}")
                 logger.info(f"📊 Current translators for this room: {list(translators.keys())}")
             else:
                 # Check if the language is supported and different from source language
-                if lang in languages:
+                try:
+                    translation_language(lang, config.translation.supported_languages)
+                    valid_target = True
+                except ValueError:
+                    valid_target = False
+                if valid_target:
                     try:
-                        # Create a translator for the requested language using the language enum
-                        language_obj = languages[lang]
-                        language_enum = getattr(LanguageCode, language_obj.name)
-                        translators[lang] = Translator(job.room, language_enum, tenant_context)
+                        ensure_translator(lang)
+                        language_obj = languages[lang.lower()]
                         logger.info(f"🆕 Added translator for ROOM {job.room.name} (requested by {participant.identity}), language: {language_obj.name}")
                         logger.info(f"🏢 Translator created with tenant context: mosque_id={tenant_context.get('mosque_id')}")
                         logger.info(f"📊 Total translators for room {job.room.name}: {len(translators)} -> {list(translators.keys())}")
@@ -904,6 +988,14 @@ async def entrypoint(job: JobContext):
 
     logger.info("Connecting to room...")
     await job.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+    # Existing participants may already carry their target attribute at connect.
+    for participant in job.room.remote_participants.values():
+        requested_target = participant.attributes.get('captions_language')
+        if requested_target and requested_target != 'off':
+            try:
+                ensure_translator(requested_target)
+            except ValueError:
+                logger.warning('Ignoring invalid requested translation language')
     logger.info(f"Successfully connected to room: {job.room.name}")
     logger.info(f"📡 Real-time transcription data will be sent via LiveKit publish_transcription")
     
@@ -930,27 +1022,24 @@ async def entrypoint(job: JobContext):
 
     @job.room.local_participant.register_rpc_method("get/languages")
     async def get_languages(data: rtc.RpcInvocationData):
-        languages_list = [asdict(lang) for lang in languages.values()]
+        # This RPC lists caption targets. The new Arabic key selects a source
+        # provider; translated Arabic continues to use the established `ar`.
+        languages_list = [asdict(lang) for lang in languages.values() if lang.code != 'ar-gemini']
         return json.dumps(languages_list)
     
-    async def cleanup_room(
+    async def _cleanup_room_once(
         reason: str,
         session_id: Optional[str] = None,
         disconnect: bool = False,
     ):
-        """Run idempotent room cleanup for frontend requests and LiveKit disconnects."""
-        nonlocal cleanup_started, heartbeat_task
-        
-        async with cleanup_lock:
-            if cleanup_started:
-                logger.info(f"Cleanup already running; ignoring duplicate request: {reason}")
-                return
-            cleanup_started = True
+        """Release shared room resources after every track has had its drain window."""
+        nonlocal heartbeat_task
         
         logger.info(f"Starting room cleanup: {reason}")
         try:
             resource_manager.log_stats()
             
+            stopping_tasks = set(draining_tasks) | set(participant_tasks.values())
             for track_key, task in list(participant_tasks.items()):
                 participant_tasks.pop(track_key, None)
                 transcript_accumulators.pop(track_key, None)
@@ -960,6 +1049,18 @@ async def entrypoint(job: JobContext):
                         f"track={track_key[1]} during room cleanup"
                     )
                     task.cancel()
+            # Gemini must receive its final text and translate the held tail
+            # before shared translators/providers are closed.
+            if stopping_tasks:
+                done, pending = await asyncio.wait(stopping_tasks, timeout=115)
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*done, return_exceptions=True)
+                if pending:
+                    logger.error('Timed out draining %s track(s) during shutdown', len(pending))
+                    _, still_pending = await asyncio.wait(pending, timeout=10)
+                    if still_pending:
+                        logger.error('Track cleanup incomplete for %s task(s)', len(still_pending))
             
             if heartbeat_task and not heartbeat_task.done():
                 heartbeat_task.cancel()
@@ -1025,6 +1126,29 @@ async def entrypoint(job: JobContext):
             logger.info("Room cleanup completed successfully")
         except Exception as e:
             logger.error(f"CRITICAL: Room cleanup failed: {e}", exc_info=True)
+
+    async def cleanup_room(
+        reason: str,
+        session_id: Optional[str] = None,
+        disconnect: bool = False,
+    ):
+        """All callers await the same cleanup, including the LiveKit shutdown hook."""
+        nonlocal shared_cleanup_task
+        async with cleanup_lock:
+            if shared_cleanup_task is None:
+                shared_cleanup_task = asyncio.create_task(
+                    _cleanup_room_once(reason, session_id=session_id, disconnect=disconnect),
+                    name='room-resource-cleanup',
+                )
+            task = shared_cleanup_task
+        # A departing frontend or duplicate disconnect callback cannot cancel
+        # the cleanup that the worker shutdown callback still needs to await.
+        await asyncio.shield(task)
+
+    async def on_job_shutdown(reason: str = ''):
+        await cleanup_room(f'job_shutdown_{reason}')
+
+    job.add_shutdown_callback(on_job_shutdown)
     
     @job.room.local_participant.register_rpc_method("request/cleanup")
     async def request_cleanup(data: rtc.RpcInvocationData):
@@ -1094,7 +1218,7 @@ def build_worker_options() -> WorkerOptions:
         load_fnc=compute_worker_load,
         load_threshold=_env_float("LIVEKIT_LOAD_THRESHOLD", 0.9, minimum=0.01),
         drain_timeout=1800,
-        shutdown_process_timeout=15,
+        shutdown_process_timeout=150,
     )
 
 

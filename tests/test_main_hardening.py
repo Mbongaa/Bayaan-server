@@ -84,9 +84,10 @@ class MainStaticHardeningTests(unittest.TestCase):
         self.assertIn("track_language: str,", forward_source)
         self.assertIn("language=track_language,", forward_source)
         self.assertIn(
-            "await translate_sentences([sentence], translators, track_language, sentence_id)",
+            "await translate_confirmed(sentence, sentence_id, track_language)",
             forward_source,
         )
+        self.assertIn('await translate_sentences([text], dict(translators), language, sentence_id)', self.source)
         self.assertNotIn("translate_sentences([sentence], translators, source_language", forward_source)
         self.assertIn("_forward_transcription(stt_stream, track, track_key, provider_lang)", self.source)
         self.assertIn("transcribe_track(participant, track, provider, participant_lang)", self.source)
