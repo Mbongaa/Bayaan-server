@@ -95,7 +95,8 @@ class RecoveryOptions:
     max_retries: int = 8
     retry_delay: float = 1.0
     max_retry_delay: float = 8.0
-    recovery_timeout: float = 60.0  # connection/replay or finalization episode; excludes healthy speech
+    recovery_timeout: float = 90.0  # active connection/replay episode; excludes healthy speech
+    stop_timeout: float = 60.0  # shared remaining drain after the caller stops
     replay_speed: float = 2.0
     fault_after_audio_seconds: float | None = None  # local, one-shot fault injection
 
@@ -103,7 +104,7 @@ class RecoveryOptions:
     def __post_init__(self):
         for name in ("rotation_seconds",
                      "max_buffer_seconds",
-                     "finalize_timeout", "connect_timeout", "replay_speed", "max_retry_delay", "recovery_timeout"):
+                     "finalize_timeout", "connect_timeout", "replay_speed", "max_retry_delay", "recovery_timeout", "stop_timeout"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive and finite")
         if self.max_retries < 0 or not math.isfinite(self.retry_delay) or self.retry_delay < 0:
@@ -297,8 +298,9 @@ class ResilientGeminiStream:
             self._input_ended = True
             # Once the caller stops, all queued windows share one drain budget.
             # It must fit the worker's65s STT drain, even after a long healthy turn.
-            self._drain_deadline = self._provider._clock() + self._opts.recovery_timeout
-            self._drain_loop_deadline = asyncio.get_running_loop().time() + self._opts.recovery_timeout
+            stop_budget = min(self._opts.recovery_timeout, self._opts.stop_timeout)
+            self._drain_deadline = self._provider._clock() + stop_budget
+            self._drain_loop_deadline = asyncio.get_running_loop().time() + stop_budget
             if self._budget_timer is not None and not self._budget_timer.expired():
                 current = self._budget_timer.when()
                 self._budget_timer.reschedule(min(current, self._drain_loop_deadline)
@@ -583,8 +585,9 @@ class ResilientGeminiStream:
             cause = last_error or exc
             logger.error("Google recovery deadline exhausted: window=%s window_elapsed=%.2fs cause_types=%s window_audio=%.2fs buffered_audio=%.2fs",
                          window.id, self._provider._clock() - started, self._cause_types(cause), window.samples / 16000, self.buffered_audio_seconds)
+            budget = min(self._opts.recovery_timeout, self._opts.stop_timeout) if self._input_ended else self._opts.recovery_timeout
             raise RecoveryError(
-                f"Google recovery deadline exhausted after {self._opts.recovery_timeout:g} seconds; "
+                f"Google recovery deadline exhausted within the {budget:g}-second {'Stop' if self._input_ended else 'active'} budget; "
                 "uncommitted audio could not be finalized. Review this recording.") from cause
         finally:
             self._budget_timer = None

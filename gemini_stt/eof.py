@@ -18,10 +18,10 @@ FILE_MODELS = {
 }
 # Keep the existing name for EOF probe/test compatibility. The same bounded
 # request now also rescues sealed activities during a continuing recording.
-# A real 16-second quiet window required 21.6 seconds on Vertex. Allow 40
-# seconds here, still inside the shared 60-second recovery/Stop deadline and
-# the worker's 65-second STT drain. A short request must not end a long lecture.
-EOF_REQUEST_TIMEOUT_SECONDS = 40.0
+# A real 16-second quiet window required 21.6 seconds on Vertex. Allow30s per
+# request while retaining time for a fresh live/file attempt in the90s active
+# recovery budget. Stop still has one shared60s deadline and a65s worker drain.
+EOF_REQUEST_TIMEOUT_SECONDS = 30.0
 
 
 def wav_bytes(pcm):

@@ -175,6 +175,7 @@ class _PunctuationStream(current.ResilientGeminiStream):
                     self.stats['eof_file_requests'] = self.stats.get('eof_file_requests', 0) + 1
                 logger.warning('Google live final missing; confirming retained activity through file transcription window=%s reason=%s audio_seconds=%.2f',
                                window.id, reason, window.samples / 16000)
+                self._connect_phase = 'file_transcription'
                 try:
                     text = await asyncio.wait_for(transcribe_window(
                         self._client, model=model,
@@ -183,9 +184,11 @@ class _PunctuationStream(current.ResilientGeminiStream):
                     ), EOF_REQUEST_TIMEOUT_SECONDS)
                 except asyncio.CancelledError:
                     raise
-                except Exception as error:
-                    # One bounded file attempt; uncertain responses never commit
-                    # source audio or trigger repeated ambiguous requests.
+                except ValueError as error:
+                    # A completed ambiguous/blocked/truncated response cannot
+                    # confirm audio. Transport/timeouts instead propagate to the
+                    # existing bounded replay loop: nothing was published, and
+                    # the cancelled request is awaited before another attempt.
                     raise current.ProtocolError(
                         'Google could not confirm the retained audio activity through its transcription endpoint; review this recording'
                     ) from error

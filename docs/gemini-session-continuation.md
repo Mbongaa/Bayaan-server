@@ -26,13 +26,25 @@ A sealed activity with no live final now follows this path:
 5. Commit the activity once. Keep incoming audio in order and open a fresh live
    connection for the following activity. Already committed audio is not replayed.
 
-The file request has a forty-second limit inside the existing shared sixty-second
-recovery/Stop deadline; the worker STT drain remains sixty-five seconds. Real
-Vertex probes needed 21.6–22.5 seconds to return an empty result for sixteen
-seconds of quiet, nonzero PCM. The previous twenty-second file deadline was too
-short. The file endpoint is a recovery path, not a replacement for normal live
-transcription. Provider failures can still exceed the bounded recovery budget;
-ambiguous audio is never silently committed as empty.
+Each file request has a thirty-second limit inside a ninety-second active
+recovery episode. Timeouts, connection failures and retryable provider errors
+return to the exact-window replay loop. The cancelled request is awaited before
+another attempt; no result from it has been committed or published. Authentication
+errors and completed ambiguous/blocked/truncated responses remain fatal.
+
+Stop recording retains one shared deadline of at most sixty seconds, including
+all queued activities and retries; an earlier active deadline is not extended.
+The worker STT drain remains sixty-five seconds. Audio retention remains bounded
+at 120 seconds. A stalled sixteen-second activity plus a ninety-second recovery
+episode fits this default buffer when it starts without a substantial backlog.
+Persistent provider degradation can still exhaust these bounds.
+
+Real Vertex probes needed 21.6–22.5 seconds to return an empty result for sixteen
+seconds of quiet, nonzero PCM; subsequent requests completed in 1.3–3.0 seconds.
+The previous twenty-second file deadline was too short. A forty-second request
+without transport retries also failed during a real nine-minute run, motivating
+the separate active/Stop budgets and retry classification. The file endpoint is
+a recovery path; ambiguous audio is never silently committed as empty.
 
 Punctuation/16-second segmentation, the minimum-three-word sentence buffer,
 translation prompts and Speechmatics routing are unchanged. No environment
@@ -60,7 +72,9 @@ commit/retry/rotation counters, without audio or credentials.
 
 Regression tests cover missing finals during continuing capture, completed empty
 audio, late-final races, exact retained PCM, ambiguous/timeout/cancelled file
-requests, sentence-buffer continuity, GoAway replay and two default rotations.
+requests, retry after a cancelled request, authentication/transient error
+classification, separate active/Stop deadlines, sentence-buffer continuity,
+GoAway replay and two default rotations.
 Real-provider and deployment results are recorded with the release verification
 artifacts. A short successful recording alone does not validate long sessions.
 

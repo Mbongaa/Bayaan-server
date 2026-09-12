@@ -63,9 +63,12 @@ class EofStreamTests(unittest.IsolatedAsyncioTestCase):
         client.file_response=response() if final_response is None else final_response
         client.file_wait=None
         client.file_reader_closed=[]
+        client.file_hook=None
         async def generate_content(**kwargs):
             client.file_calls.append(kwargs)
             client.file_reader_closed.append(all(session.closed for session in client.sessions))
+            if client.file_hook is not None:
+                await client.file_hook()
             if client.file_wait is not None:
                 await client.file_wait.wait()
             return client.file_response
@@ -256,7 +259,7 @@ class EofStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stream.stats['retries'],0)
 
     async def test_file_timeout_is_bounded_and_never_commits(self):
-        client,_,stream=await self.make_eof()
+        client,_,stream=await self.make_eof(max_retries=0)
         client.file_wait=asyncio.Event()
         push(stream,pcm(1))
         stream.end_input()
@@ -266,6 +269,144 @@ class EofStreamTests(unittest.IsolatedAsyncioTestCase):
                     pass
         self.assertEqual(len(client.file_calls),1)
         self.assertEqual(stream.stats['committed_windows'],0)
+
+    async def test_timed_out_file_request_is_cancelled_before_same_pcm_recovers_live(self):
+        client,_,stream=await self.make_eof(finalize_timeout=.02)
+        source=pcm(1500,3520)
+        cancelled=[]
+        async def first_file_stalls():
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.append(True)
+                client.no_final=False
+        client.file_hook=first_file_stalls
+        push(stream,source)
+        await until(lambda: client.sessions and client.sessions[0].audio)
+        client.sessions[0].incoming.put_nowait(event(interim_input_transcription=types.Transcription(text='Draft.')))
+        with patch('gemini_stt.hybrid.EOF_REQUEST_TIMEOUT_SECONDS',.03):
+            await until(lambda: stream.stats['committed_windows']==1)
+            stream.end_input()
+            finals=[e async for e in stream if e.type==stt.SpeechEventType.FINAL_TRANSCRIPT]
+        self.assertEqual(cancelled,[True])
+        self.assertEqual(len(client.file_calls),1)
+        self.assertEqual(client.activities,[source,source])
+        self.assertEqual(stream.stats['retries'],1)
+        self.assertEqual(stream.stats['replayed_samples'],3520)
+        self.assertEqual(len(finals),1)
+        self.assertEqual(finals[0].alternatives[0].metadata['finalization_source'],'live')
+        self.assertEqual(finals[0].alternatives[0].metadata['recovery_attempt'],1)
+
+    async def test_second_file_attempt_can_confirm_once_after_first_timeout(self):
+        client,_,stream=await self.make_eof(response('Recovered final.'),finalize_timeout=.02)
+        source=pcm(1500,3520)
+        cancelled=[]
+        async def first_file_stalls():
+            if len(client.file_calls)==1:
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.append(True)
+            else:
+                self.assertEqual(cancelled,[True])
+        client.file_hook=first_file_stalls
+        push(stream,source)
+        await until(lambda: client.sessions and client.sessions[0].audio)
+        client.sessions[0].incoming.put_nowait(event(interim_input_transcription=types.Transcription(text='Draft.')))
+        with patch('gemini_stt.hybrid.EOF_REQUEST_TIMEOUT_SECONDS',.03):
+            await until(lambda: stream.stats['committed_windows']==1)
+            stream.end_input()
+            finals=[e async for e in stream if e.type==stt.SpeechEventType.FINAL_TRANSCRIPT]
+        self.assertEqual(len(client.file_calls),2)
+        self.assertEqual(client.activities,[source,source])
+        self.assertEqual(stream.stats['retries'],1)
+        self.assertEqual(stream.stats['sealed_file_finalized_windows'],1)
+        self.assertEqual([e.alternatives[0].text for e in finals],['Recovered final.'])
+        self.assertEqual(finals[0].alternatives[0].metadata['recovery_attempt'],1)
+        for request in client.file_calls:
+            with wave.open(io.BytesIO(request['contents'][0].inline_data.data),'rb') as audio:
+                self.assertEqual(audio.readframes(audio.getnframes()),source)
+
+    async def test_file_authentication_failure_stays_fatal_without_replay(self):
+        class AuthenticationError(RuntimeError):
+            def __init__(self,code):
+                self.code=code
+        for code in (401,403):
+            with self.subTest(code=code):
+                client,_,stream=await self.make_eof(finalize_timeout=.02)
+                async def rejected():
+                    raise AuthenticationError(code)
+                client.file_hook=rejected
+                push(stream,pcm(1))
+                stream.end_input()
+                with self.assertRaises(recovery.RecoveryError):
+                    async for _ in stream:
+                        pass
+                self.assertEqual(len(client.file_calls),1)
+                self.assertEqual(stream.stats['retries'],0)
+                self.assertEqual(stream.stats['committed_windows'],0)
+
+    async def test_file_rate_limit_and_server_failure_recover_through_new_live_attempt(self):
+        class ProviderError(RuntimeError):
+            def __init__(self,code):
+                self.code=code
+        for code in (429,503):
+            with self.subTest(code=code):
+                client,_,stream=await self.make_eof(finalize_timeout=.02)
+                async def transient_failure():
+                    client.no_final=False
+                    raise ProviderError(code)
+                client.file_hook=transient_failure
+                push(stream,pcm(1))
+                stream.end_input()
+                finals=[e async for e in stream if e.type==stt.SpeechEventType.FINAL_TRANSCRIPT]
+                self.assertEqual(len(client.file_calls),1)
+                self.assertEqual(stream.stats['retries'],1)
+                self.assertEqual(len(finals),1)
+                self.assertEqual(finals[0].alternatives[0].metadata['finalization_source'],'live')
+
+    async def test_stop_during_file_request_shortens_longer_active_deadline(self):
+        client,_,stream=await self.make_eof(recovery_timeout=2,stop_timeout=.1,finalize_timeout=.02)
+        client.file_wait=asyncio.Event()
+        push(stream,pcm(1))
+        await until(lambda: client.sessions and client.sessions[0].audio)
+        client.sessions[0].incoming.put_nowait(event(interim_input_transcription=types.Transcription(text='Draft.')))
+        await until(lambda: client.file_calls)
+        old_deadline=stream._budget_timer.when()
+        now=asyncio.get_running_loop().time()
+        stream.end_input()
+        self.assertLess(stream._budget_timer.when(),old_deadline)
+        self.assertLessEqual(stream._budget_timer.when(),now+.101)
+        with self.assertRaisesRegex(recovery.RecoveryError,'Stop'):
+            async for _ in stream:
+                pass
+        self.assertLess(asyncio.get_running_loop().time()-now,.5)
+        self.assertEqual(stream.stats['committed_windows'],0)
+        self.assertEqual(stream.stats['retries'],0)
+
+    async def test_stop_does_not_extend_an_earlier_active_deadline(self):
+        client,_,stream=await self.make_eof(recovery_timeout=.7,stop_timeout=2,finalize_timeout=.02)
+        client.file_wait=asyncio.Event()
+        push(stream,pcm(1))
+        await until(lambda: client.sessions and client.sessions[0].audio)
+        client.sessions[0].incoming.put_nowait(event(interim_input_transcription=types.Transcription(text='Draft.')))
+        await until(lambda: client.file_calls)
+        old_deadline=stream._budget_timer.when()
+        stream.end_input()
+        self.assertEqual(stream._budget_timer.when(),old_deadline)
+        with self.assertRaises(recovery.RecoveryError):
+            async for _ in stream:
+                pass
+        self.assertEqual(stream.stats['committed_windows'],0)
+
+    def test_active_recovery_and_stop_have_distinct_bounded_defaults(self):
+        options=recovery.RecoveryOptions()
+        self.assertEqual(options.recovery_timeout,90)
+        self.assertEqual(options.stop_timeout,60)
+        self.assertGreater(options.max_buffer_seconds,options.recovery_timeout+16)
+        for invalid in (0,-1,float('inf'),float('nan')):
+            with self.subTest(value=invalid),self.assertRaises(ValueError):
+                recovery.RecoveryOptions(stop_timeout=invalid)
 
     async def test_cancelled_file_request_never_commits(self):
         client,_,stream=await self.make_eof()
