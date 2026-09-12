@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from google.genai import types
 from livekit.agents import stt
 from gemini_stt.eof import completed_transcription, wav_bytes
+from gemini_stt.buffer import forward_hybrid_sentences
 from gemini_stt import recovery
 import test_gemini_hybrid_stream as fixtures
 from test_gemini_hybrid_stream import Client, event, pcm, push, until
@@ -61,8 +62,10 @@ class EofStreamTests(unittest.IsolatedAsyncioTestCase):
         client.file_calls=[]
         client.file_response=response() if final_response is None else final_response
         client.file_wait=None
+        client.file_reader_closed=[]
         async def generate_content(**kwargs):
             client.file_calls.append(kwargs)
+            client.file_reader_closed.append(all(session.closed for session in client.sessions))
             if client.file_wait is not None:
                 await client.file_wait.wait()
             return client.file_response
@@ -124,16 +127,122 @@ class EofStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finals[0].alternatives[0].metadata['finalization_source'],'live')
         self.assertEqual(client.file_calls,[])
 
-    async def test_missing_punctuation_final_during_streaming_never_uses_file_endpoint(self):
-        client,_,stream=await self.make_eof(max_retries=0)
-        push(stream,pcm(1))
+    async def test_missing_punctuation_final_is_confirmed_then_future_audio_continues(self):
+        client,_,stream=await self.make_eof(response('Confirmed first activity.'), max_retries=0)
+        first, tail = pcm(1, 3520), pcm(2, 1600)
+        push(stream, first)
         await until(lambda: client.sessions and client.sessions[0].audio)
         client.sessions[0].incoming.put_nowait(event(interim_input_transcription=types.Transcription(text='Draft.')))
+        # Continue capturing while the live endpoint has not returned a final.
+        await until(lambda: len(client.activities) == 1)
+        push(stream, tail)
+        await until(lambda: stream.stats['committed_windows'] == 1)
+        self.assertFalse(stream._input_ended)
+        client.no_final=False
+        stream.end_input()
+        finals=[e async for e in stream if e.type==stt.SpeechEventType.FINAL_TRANSCRIPT]
+        self.assertEqual([f.alternatives[0].text for f in finals], ['Confirmed first activity.', client.final_text])
+        self.assertEqual([f.alternatives[0].metadata['finalization_source'] for f in finals],
+                         ['activity_file_transcription', 'live'])
+        self.assertEqual([f.alternatives[0].metadata['audio_window_start_sample'] for f in finals], [0,3520])
+        self.assertEqual([f.alternatives[0].metadata['audio_window_end_sample'] for f in finals], [3520,5120])
+        self.assertEqual(len(set(f.request_id for f in finals)), 2)
+        self.assertEqual(client.activities, [first,tail])
+        self.assertEqual(client.file_reader_closed, [True])
+        self.assertEqual(len(client.sessions), 2)
+        self.assertEqual(stream.stats['sealed_file_finalized_windows'],1)
+        self.assertEqual(stream.stats.get('eof_file_requests',0),0)
+        self.assertEqual(stream.stats['retries'],0)
+        with wave.open(io.BytesIO(client.file_calls[0]['contents'][0].inline_data.data),'rb') as audio:
+            self.assertEqual(audio.readframes(audio.getnframes()), first)
+
+    async def test_quiet_16_second_activity_confirms_empty_and_retains_following_speech(self):
+        client,_,stream=await self.make_eof()
+        quiet, speech = pcm(1, 16*16000), pcm(3000, 2057)
+        # A frame crossing the maximum also exercises the retained carry path.
+        push(stream, quiet+speech)
+        await until(lambda: stream.stats['committed_windows']==1)
+        self.assertFalse(stream._input_ended)
+        client.no_final=False
+        stream.end_input()
+        finals=[e async for e in stream if e.type==stt.SpeechEventType.FINAL_TRANSCRIPT]
+        self.assertEqual([f.alternatives[0].text for f in finals], ['',client.final_text])
+        self.assertEqual([f.alternatives[0].metadata['boundary_reason'] for f in finals], ['duration_limit','eof'])
+        self.assertEqual(finals[1].alternatives[0].metadata['audio_window_start_sample'],256000)
+        self.assertEqual(finals[1].alternatives[0].metadata['audio_window_end_sample'],258057)
+        self.assertEqual(client.activities,[quiet,speech])
+        self.assertEqual(stream.stats['sealed_file_empty_windows'],1)
+        self.assertEqual(stream.stats['committed_windows'],2)
+        self.assertEqual(stream.stats['retries'],0)
+
+    async def test_ambiguous_non_eof_file_result_keeps_activity_uncommitted_and_never_replays(self):
+        client,_,stream=await self.make_eof(types.GenerateContentResponse(), max_retries=3)
+        push(stream,pcm(1))
+        await until(lambda: client.sessions and client.sessions[0].audio)
+        client.sessions[0].incoming.put_nowait(event(interim_input_transcription=types.Transcription(text='Unconfirmed draft.')))
         with self.assertRaises(recovery.RecoveryError):
             async for _ in stream:
                 pass
-        self.assertEqual(client.file_calls,[])
+        self.assertFalse(stream._input_ended)
+        self.assertEqual(len(client.file_calls),1)
         self.assertEqual(stream.stats['committed_windows'],0)
+        self.assertEqual(stream.stats['retries'],0)
+        self.assertEqual(len(client.sessions),1)
+
+    async def test_non_eof_late_live_final_wins_then_next_activity_opens_new_socket(self):
+        client,_,stream=await self.make_eof()
+        disconnect=stream._disconnect
+        async def close_after_live_final():
+            attempt=stream._attempt
+            await disconnect()
+            if attempt is not None and not attempt.done.done():
+                attempt.done.set_result(('Late authoritative live final.','ar-EG'))
+        stream._disconnect=close_after_live_final
+        push(stream,pcm(1,3520))
+        await until(lambda: client.sessions and client.sessions[0].audio)
+        client.sessions[0].incoming.put_nowait(event(interim_input_transcription=types.Transcription(text='Draft.')))
+        await until(lambda: stream.stats['committed_windows']==1)
+        client.no_final=False
+        push(stream,pcm(2,1600))
+        stream.end_input()
+        finals=[e async for e in stream if e.type==stt.SpeechEventType.FINAL_TRANSCRIPT]
+        self.assertEqual([f.alternatives[0].text for f in finals],['Late authoritative live final.',client.final_text])
+        self.assertEqual([f.alternatives[0].metadata['finalization_source'] for f in finals],['live','live'])
+        self.assertEqual(client.file_calls,[])
+        self.assertEqual(len(client.sessions),2)
+
+    async def test_sentence_buffer_keeps_its_tail_across_file_rescue_and_socket_change(self):
+        client,provider,stream=await self.make_eof(response('لله رب العالمين.'))
+        client.no_final=False
+        client.final_text='الحمد'
+        publications,translations=[],[]
+        ended=asyncio.Event()
+        async def publish(*item):
+            publications.append(item)
+        async def translate(*item):
+            translations.append(item)
+        forwarding=asyncio.create_task(forward_hybrid_sentences(
+            stream,publish,translate,ended,provider.language))
+        push(stream,pcm(1,1600))
+        await until(lambda: client.sessions and client.sessions[0].audio)
+        client.sessions[0].incoming.put_nowait(event(interim_input_transcription=types.Transcription(text='الحمد.')))
+        await until(lambda: stream.stats['committed_windows']==1)
+        client.no_final=True
+        push(stream,pcm(2,3520))
+        await until(lambda: len(client.calls)>0 and bytes(client.sessions[0].audio)==pcm(2,3520))
+        client.sessions[0].incoming.put_nowait(event(interim_input_transcription=types.Transcription(text='لله رب العالمين.')))
+        await until(lambda: stream.stats['committed_windows']==2)
+        client.no_final=False
+        client.final_text='تستمر ترجمة هذا الكلام.'
+        push(stream,pcm(3,1600))
+        ended.set()
+        stream.end_input()
+        await asyncio.wait_for(forwarding,3)
+        self.assertEqual([item[0] for item in translations],['الحمد لله رب العالمين.','تستمر ترجمة هذا الكلام.'])
+        self.assertEqual(len(set(item[1] for item in translations)),2)
+        self.assertEqual(len([item for item in publications if item[3]]),3)
+        self.assertEqual(stream.stats['committed_windows'],3)
+        self.assertEqual(len(client.sessions),2)
 
     async def test_ambiguous_file_result_fails_once_without_retry_or_empty_commit(self):
         client,_,stream=await self.make_eof(types.GenerateContentResponse())

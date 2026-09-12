@@ -12,7 +12,7 @@ from livekit.agents import stt
 from . import recovery as current
 from .compat import SpeechData
 from .sentences import split_complete_sentences
-from .eof import FILE_MODELS, EOF_REQUEST_TIMEOUT_SECONDS, transcribe_eof
+from .eof import FILE_MODELS, EOF_REQUEST_TIMEOUT_SECONDS, transcribe_window
 logger = logging.getLogger('bayaan.gemini.segmentation')
 
 @dataclass(frozen=True)
@@ -158,17 +158,25 @@ class _PunctuationStream(current.ResilientGeminiStream):
                 self._guard(asyncio.shield(attempt.done)), self._opts.finalize_timeout)
         except asyncio.TimeoutError:
             model = FILE_MODELS.get(self._provider.model)
-            if not (self._input_ended and self._eof and getattr(window, 'boundary_reason', None) == 'eof' and model):
+            if not (window.sealed and attempt.end_sent and model
+                    and 0 < window.samples <= self._provider.max_segment_seconds * 16000):
                 raise current.RecoveryError('Google did not provide an authoritative final for the punctuation-requested activity; audio retained for retry') from None
+            reason = getattr(window, 'boundary_reason', None)
+            is_eof = reason == 'eof' and self._input_ended and self._eof
             # End the live receiver before a second endpoint can decide the same
-            # uncommitted audio. A final that already arrived still wins.
+            # uncommitted audio. A final that already arrived still wins. The
+            # next activity opens a fresh socket while captured audio stays FIFO.
             await self._disconnect()
             if attempt.done.done() and not attempt.done.cancelled():
                 text, language = attempt.done.result()
             else:
-                self.stats['eof_file_requests'] = self.stats.get('eof_file_requests', 0) + 1
+                self.stats['sealed_file_requests'] = self.stats.get('sealed_file_requests', 0) + 1
+                if is_eof:
+                    self.stats['eof_file_requests'] = self.stats.get('eof_file_requests', 0) + 1
+                logger.warning('Google live final missing; confirming retained activity through file transcription window=%s reason=%s audio_seconds=%.2f',
+                               window.id, reason, window.samples / 16000)
                 try:
-                    text = await asyncio.wait_for(transcribe_eof(
+                    text = await asyncio.wait_for(transcribe_window(
                         self._client, model=model,
                         pcm=b''.join(chunk.pcm for chunk in window.chunks),
                         audio_config=self._provider._config.input_audio_transcription,
@@ -179,16 +187,20 @@ class _PunctuationStream(current.ResilientGeminiStream):
                     # One bounded file attempt; uncertain responses never commit
                     # source audio or trigger repeated ambiguous requests.
                     raise current.ProtocolError(
-                        'Google could not confirm the final EOF audio through its transcription endpoint; review this recording'
+                        'Google could not confirm the retained audio activity through its transcription endpoint; review this recording'
                     ) from error
                 language = self._provider.language
-                attempt.finalization_source = 'eof_file_transcription'
+                attempt.finalization_source = 'eof_file_transcription' if is_eof else 'activity_file_transcription'
                 attempt.finalization_model = model
-                self.stats['eof_file_finalized_windows'] = self.stats.get('eof_file_finalized_windows', 0) + 1
+                self.stats['sealed_file_finalized_windows'] = self.stats.get('sealed_file_finalized_windows', 0) + 1
+                if is_eof:
+                    self.stats['eof_file_finalized_windows'] = self.stats.get('eof_file_finalized_windows', 0) + 1
                 if not text:
-                    self.stats['eof_file_empty_windows'] = self.stats.get('eof_file_empty_windows', 0) + 1
-                logger.info('Google EOF transcription confirmed window=%s model=%s source_samples=%s empty=%s',
-                            window.id, model, window.samples, not bool(text))
+                    self.stats['sealed_file_empty_windows'] = self.stats.get('sealed_file_empty_windows', 0) + 1
+                    if is_eof:
+                        self.stats['eof_file_empty_windows'] = self.stats.get('eof_file_empty_windows', 0) + 1
+                logger.info('Google sealed activity transcription confirmed window=%s reason=%s model=%s source_samples=%s empty=%s',
+                            window.id, reason, model, window.samples, not bool(text))
         # An authoritative empty final still resolves a prior speculative preview.
         # Forward that provider event so the caller can clear it without GPT work.
         await self._emit(stt.SpeechEventType.FINAL_TRANSCRIPT, text, language, attempt)

@@ -261,6 +261,7 @@ class ResilientGeminiStream:
         self._client_startup = self._client_ready = None
         self._attempt: _Attempt | None = None
         self._connection_start = 0.0
+        self._last_checkpoint = 0.0
         self._connect_phase = 'idle'
         self._connection_samples = self._fresh_sent_samples = 0
         self._fault_injected = False
@@ -425,6 +426,9 @@ class ResilientGeminiStream:
         self._connection_start, self._connection_samples = self._provider._clock(), 0
         self.stats["connections"] += 1
         self._reader = asyncio.create_task(self._receive(), name="local-google-receive")
+        logger.info("Google connection ready: stream=%s connection=%d rotation_seconds=%.0f buffered_audio=%.2fs",
+                    self._stream_id, self.stats["connections"], self._opts.rotation_seconds,
+                    self.buffered_audio_seconds)
 
     async def _disconnect(self):
         if self._reader is not None:
@@ -445,6 +449,9 @@ class ResilientGeminiStream:
             async for message in self._session.receive():
                 received = True
                 if getattr(message, "go_away", None):
+                    logger.info("Google requested connection rollover: stream=%s connection=%d connection_age=%.2fs",
+                                self._stream_id, self.stats["connections"],
+                                self._provider._clock() - self._connection_start)
                     raise RecoveryError("Google requested a new connection; retaining uncommitted audio")
                 attempt = self._attempt
                 voice = getattr(message, "voice_activity", None)
@@ -591,9 +598,19 @@ class ResilientGeminiStream:
                 if self._session and (self._provider._clock() - self._connection_start >= self._opts.rotation_seconds
                                       or self._connection_samples / 16000 >= self._opts.rotation_seconds):
                     self.stats["rotations"] += 1
-                    logger.info("Rotating Google connection at committed audio boundary")
+                    logger.info("Rotating Google connection at committed audio boundary: stream=%s connection=%d connection_age=%.2fs connection_audio=%.2fs committed_windows=%d buffered_audio=%.2fs",
+                                self._stream_id, self.stats["connections"],
+                                self._provider._clock() - self._connection_start,
+                                self._connection_samples / 16000,
+                                self.stats["committed_windows"], self.buffered_audio_seconds)
                     await self._disconnect()
                 await self._run_window(window)
+                now = self._provider._clock()
+                if now - self._last_checkpoint >= 60:
+                    self._last_checkpoint = now
+                    logger.info("Google stream checkpoint: stream=%s received_audio=%.2fs buffered_audio=%.2fs statistics=%s",
+                                self._stream_id, self._received_samples / 16000,
+                                self.buffered_audio_seconds, json.dumps(self.stats, sort_keys=True))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
