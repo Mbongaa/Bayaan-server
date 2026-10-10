@@ -3,8 +3,8 @@ Configuration management for LiveKit AI Translation Server.
 Centralizes all configuration values and environment variables.
 """
 import os
-from dataclasses import dataclass
-from typing import Optional, Dict
+from dataclasses import dataclass, field
+from typing import Any, Optional, Dict
 # Try to load dotenv if available
 try:
     from dotenv import load_dotenv
@@ -50,6 +50,11 @@ class TranslationConfig:
     # Language settings
     default_source_language: str = "ar"  # Arabic
     default_target_language: str = "nl"  # Dutch
+    
+    # Model settings
+    # TRANSLATION_MODEL switches the model (or rolls back to gpt-4.1) without a code change.
+    model: str = field(default_factory=lambda: os.getenv('TRANSLATION_MODEL', 'gpt-5.4-mini'))
+    fallback_model: str = "gpt-4.1"  # Used for the rest of a session when the API key cannot use `model`
     
     # Context window settings
     use_context: bool = True
@@ -150,6 +155,18 @@ class TranslationConfig:
             size = int(room_config['context_window_size'])
             return max(3, min(20, size))
         return self.max_context_pairs
+    
+    def llm_settings(self, model: str) -> Dict[str, Any]:
+        """Request settings for a translation model.
+
+        gpt-5.4-mini runs with thinking off and temperature 0: in the October 2026
+        benchmark that kept negations and Qur'an references most reliably. Other models
+        are called with API defaults because they reject these settings (gpt-4.1 refuses
+        reasoning_effort), so rolling back only needs TRANSLATION_MODEL.
+        """
+        if model.startswith("gpt-5.4-mini"):
+            return {"temperature": 0, "reasoning_effort": "none"}
+        return {}
 
 
 @dataclass
@@ -239,6 +256,7 @@ class ApplicationConfig:
 
         print(f"   Default Languages: {self.translation.default_source_language} → {self.translation.default_target_language}")
         print(f"   Context Window: {'✅ ENABLED' if self.translation.use_context else '❌ DISABLED'} ({self.translation.max_context_pairs} pairs)")
+        print(f"   Translation Model: {self.translation.model} (fallback: {self.translation.fallback_model})")
         print(f"   STT Defaults: delay={self.speechmatics.max_delay}s, punctuation={self.speechmatics.punctuation_sensitivity}, partials={'✅' if self.speechmatics.enable_partials else '❌'}")
 
 

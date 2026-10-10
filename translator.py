@@ -10,7 +10,7 @@ from collections import deque
 from enum import Enum
 
 from livekit import rtc
-from livekit.agents import llm, utils
+from livekit.agents import APIError, APIStatusError, llm, utils
 from livekit.plugins import openai
 
 from config import get_config
@@ -52,7 +52,8 @@ class Translator:
         self.room = room
         self.lang = lang
         self.tenant_context = tenant_context or {}
-        self.llm = openai.LLM(model="gpt-4.1")
+        self.model = config.translation.model
+        self.llm = openai.LLM(model=self.model)
         
         # Initialize system prompt as None - will be built dynamically
         self.system_prompt = None
@@ -71,7 +72,7 @@ class Translator:
         
         # Log the context mode being used
         context_mode = f"TRUE SLIDING WINDOW ({self.max_context_pairs}-pair memory)" if self.use_context else "FRESH CONTEXT (no memory)"
-        logger.info(f"🧠 Translator initialized for {lang.value} with {context_mode} mode")
+        logger.info(f"🧠 Translator initialized for {lang.value} with {context_mode} mode, model {self.model}")
         
         # Initialize prompt asynchronously on first use. The prompt is built for a
         # specific SOURCE language (the language the speaker's track is actually
@@ -206,7 +207,7 @@ class Translator:
             f"- For Subhanahu wa Ta‘ala (Glorified and Exalted be He), use symbol ﷻ\n"
             f"- Use (RA) for “Radiyallahu ‘anhu / ‘anha.”\n"
             f"- Use (AS) for “‘Alayhis Salaam / ‘Alayha as-Salaam.”\n"
-            f"- Format Qur’anic ayahs as (Surah#:Ayah#), such as (2:153).\n"
+            f"- Whenever the text is or contains a Qur’anic ayah — even when the speaker does not announce it, when the spelling is imperfect, or when only part of an ayah is recited — add its reference as (Surah#:Ayah#), such as (2:153). Only add a reference when you are certain of it; never add one to hadith, du‘a or other non-Qur’anic speech.\n"
             f"\n"
             f"Context:\n"
             f"- Live, formal mosque sermons for a broad {target_lang_name}-speaking audience.\n"
@@ -304,7 +305,30 @@ class Translator:
         temp_context.add_message(content=message, role="user")
         
         # Get translation from LLM with the freshly built context
-        stream = self.llm.chat(chat_ctx=temp_context)
+        try:
+            translated_message = await self._run_llm(temp_context)
+        except APIError as e:
+            # This API key cannot use the configured model (not enabled, renamed or
+            # retired). Keep the session translated with the fallback model.
+            if not self._model_unavailable(e) or self.model == config.translation.fallback_model:
+                raise
+            await self._switch_to_fallback_model(e)
+            translated_message = await self._run_llm(temp_context)
+
+        # If using context, update our history (deque will auto-remove old messages)
+        if self.use_context and translated_message:
+            self.message_history.append({"role": "user", "content": message})
+            self.message_history.append({"role": "assistant", "content": translated_message})
+            logger.debug(f"💾 History updated. Current size: {len(self.message_history)} messages")
+        
+        return translated_message
+
+    async def _run_llm(self, chat_ctx) -> str:
+        """Stream one completion from the current model and return its text."""
+        stream = self.llm.chat(
+            chat_ctx=chat_ctx,
+            extra_kwargs=config.translation.llm_settings(self.model),
+        )
 
         translated_message = ""
         try:
@@ -326,13 +350,29 @@ class Translator:
             except Exception:
                 pass  # Best-effort cleanup - falls back to GC if this fails
 
-        # If using context, update our history (deque will auto-remove old messages)
-        if self.use_context and translated_message:
-            self.message_history.append({"role": "user", "content": message})
-            self.message_history.append({"role": "assistant", "content": translated_message})
-            logger.debug(f"💾 History updated. Current size: {len(self.message_history)} messages")
-        
         return translated_message
+
+    @staticmethod
+    def _model_unavailable(error: BaseException) -> bool:
+        """True when the API refused the model itself (HTTP 403/404).
+
+        The plugin retries first and then raises a connection error whose cause is
+        the original status error, so both are checked.
+        """
+        return any(isinstance(candidate, APIStatusError) and candidate.status_code in (403, 404)
+                   for candidate in (error, error.__cause__))
+
+    async def _switch_to_fallback_model(self, error: Exception) -> None:
+        """Use the fallback model for the rest of this session."""
+        fallback = config.translation.fallback_model
+        logger.error(
+            f"❌ Translation model {self.model} is not available to this API key ({error.__cause__ or error}); "
+            f"using {fallback} for {self.lang.value} for the rest of this session"
+        )
+        unavailable = self.llm
+        self.model = fallback
+        self.llm = openai.LLM(model=fallback)
+        await self._close_llm(unavailable)
 
     async def translate_strict(self, message: str, sentence_id: str,
                                source_language: str) -> str:
@@ -417,16 +457,19 @@ class Translator:
                 raise
             # Don't re-raise - translation was successful even if publishing failed
 
-    async def close(self):
-        """Close the LLM client and release all resources."""
-        # Close the openai.LLM httpx client to free SSL contexts, sockets, connection pools
+    async def _close_llm(self, llm_client) -> None:
+        """Close an openai.LLM httpx client to free SSL contexts, sockets, connection pools."""
         try:
-            if hasattr(self.llm, '_client') and hasattr(self.llm._client, 'aclose'):
-                await self.llm._client.aclose()
-            elif hasattr(self.llm, 'aclose'):
-                await self.llm.aclose()
+            if hasattr(llm_client, '_client') and hasattr(llm_client._client, 'aclose'):
+                await llm_client._client.aclose()
+            elif hasattr(llm_client, 'aclose'):
+                await llm_client.aclose()
         except Exception as e:
             logger.warning(f"Error closing LLM client for {self.lang.value}: {e}")
+
+    async def close(self):
+        """Close the LLM client and release all resources."""
+        await self._close_llm(self.llm)
 
         # Clear context history to release string references
         if self.use_context and hasattr(self, 'message_history'):

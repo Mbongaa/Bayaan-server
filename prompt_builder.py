@@ -39,7 +39,7 @@ class PromptBuilder:
         "- For Subhanahu wa Ta‘ala (Glorified and Exalted be He), use symbol ﷻ\n"
         "- Use (RA) for “Radiyallahu ‘anhu / ‘anha.”\n"
         "- Use (AS) for “‘Alayhis Salaam / ‘Alayha as-Salaam.”\n"
-        "- Format Qur’anic ayahs as (Surah#:Ayah#), such as (2:153).\n"
+        "- Whenever the text is or contains a Qur’anic ayah — even when the speaker does not announce it, when the spelling is imperfect, or when only part of an ayah is recited — add its reference as (Surah#:Ayah#), such as (2:153). Only add a reference when you are certain of it; never add one to hadith, du‘a or other non-Qur’anic speech.\n"
         "\n"
         "Context:\n"
         "- Live, formal mosque sermons for a broad {target_lang}-speaking audience.\n"

@@ -3,7 +3,6 @@ import ast
 import asyncio
 from collections import deque
 from enum import Enum
-import hashlib
 import json
 import logging
 from pathlib import Path
@@ -81,9 +80,13 @@ class ProductionPromptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(translator.translation_count, 0)
         translator._perform_translation.assert_awaited_once()
 
-    def test_original_prompt_builder_is_byte_identical_to_restore_point(self):
-        baseline = SERVER.parents[1] / 'local-stt-lab/restore-points/pre-classroom-integration-2026-09-12/prompt_builder.py'
-        self.assertEqual(hashlib.sha256(baseline.read_bytes()).digest(), hashlib.sha256((SERVER / 'prompt_builder.py').read_bytes()).digest())
+    def test_fallback_prompt_stays_identical_to_default_prompt(self):
+        # The Khutba prompt lives in prompt_builder.py, in the translator fallback and in
+        # Supabase. The two copies in this repository must never drift apart.
+        translator = self.Translator(self.room, translation_language('nl', self.config.translation.supported_languages))
+        self.assertEqual(translator._fallback_prompt('Arabic', 'Dutch'),
+                         self.builder.DEFAULT_PROMPT.format(source_lang='Arabic', target_lang='Dutch'))
+        self.assertIn('Whenever the text is or contains a Qur’anic ayah', self.builder.DEFAULT_PROMPT)
 
 
 if __name__ == '__main__':
