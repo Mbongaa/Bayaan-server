@@ -52,8 +52,8 @@ class TranslationConfig:
     default_target_language: str = "nl"  # Dutch
     
     # Model settings
-    # TRANSLATION_MODEL switches the model (or rolls back to gpt-4.1) without a code change.
-    model: str = field(default_factory=lambda: os.getenv('TRANSLATION_MODEL', 'gpt-5.4-mini'))
+    # TRANSLATION_MODEL switches the model (or rolls back to gpt-5.4-mini / gpt-4.1) without a code change.
+    model: str = field(default_factory=lambda: os.getenv('TRANSLATION_MODEL', 'gpt-6-luna'))
     fallback_model: str = "gpt-4.1"  # Used for the rest of a session when the API key cannot use `model`
     
     # Context window settings
@@ -159,11 +159,15 @@ class TranslationConfig:
     def llm_settings(self, model: str) -> Dict[str, Any]:
         """Request settings for a translation model.
 
-        gpt-5.4-mini runs with thinking off and temperature 0: in the October 2026
-        benchmark that kept negations and Qur'an references most reliably. Other models
-        are called with API defaults because they reject these settings (gpt-4.1 refuses
-        reasoning_effort), so rolling back only needs TRANSLATION_MODEL.
+        gpt-6-luna runs with thinking off, temperature 0 and Fast processing (service_tier
+        "priority"): in the October 2026 benchmark it translated real khutbahs better than
+        gpt-5.4-mini at the same speed (about 1.1 s per caption). gpt-5.4-mini keeps the
+        settings it was tuned with, for rollback. Other models are called with API defaults
+        because they reject these settings (gpt-4.1 refuses reasoning_effort), so rolling
+        back only needs TRANSLATION_MODEL.
         """
+        if model.startswith("gpt-6-luna"):
+            return {"temperature": 0, "reasoning_effort": "none", "service_tier": "priority"}
         if model.startswith("gpt-5.4-mini"):
             return {"temperature": 0, "reasoning_effort": "none"}
         return {}

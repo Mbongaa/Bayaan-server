@@ -17,7 +17,8 @@ from config import TranslationConfig
 from language_routing import translation_language
 from test_production_prompt_reuse import SERVER, load_class
 
-TUNED = {'temperature': 0, 'reasoning_effort': 'none'}
+LUNA = {'temperature': 0, 'reasoning_effort': 'none', 'service_tier': 'priority'}
+MINI = {'temperature': 0, 'reasoning_effort': 'none'}
 
 
 def after_plugin_retries(status_code):
@@ -91,44 +92,48 @@ class TranslationModelTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ):
             os.environ.pop('TRANSLATION_MODEL', None)
             settings = TranslationConfig()
-        self.assertEqual(settings.model, 'gpt-5.4-mini')
-        self.assertEqual(settings.llm_settings('gpt-5.4-mini'), TUNED)
-        self.assertEqual(settings.llm_settings('gpt-5.4-mini-2026-03-17'), TUNED)
+        self.assertEqual(settings.model, 'gpt-6-luna')
+        self.assertEqual(settings.llm_settings('gpt-6-luna'), LUNA)
+        # The rollback model keeps the settings it was benchmarked with, without Fast processing.
+        self.assertEqual(settings.llm_settings('gpt-5.4-mini'), MINI)
+        self.assertEqual(settings.llm_settings('gpt-5.4-mini-2026-03-17'), MINI)
         # gpt-4.1 rejects reasoning_effort, so it must be called without extra settings.
         self.assertEqual(settings.llm_settings('gpt-4.1'), {})
 
     async def test_translation_request_uses_the_configured_model_and_settings(self):
-        translator = self.make_translator({'gpt-5.4-mini': 'Wij zeggen niet dat de aanbidding ongeldig is.'})
+        translator = self.make_translator({'gpt-6-luna': 'Wij zeggen niet dat de aanbidding ongeldig is.'})
         result = await translator._perform_translation('ما نقولو احنا العباده راها باطله.', 'ar')
         self.assertEqual(result, 'Wij zeggen niet dat de aanbidding ongeldig is.')
-        self.assertEqual([(fake.model, fake.requests) for fake in self.created], [('gpt-5.4-mini', [TUNED])])
+        self.assertEqual([(fake.model, fake.requests) for fake in self.created], [('gpt-6-luna', [LUNA])])
 
-    async def test_environment_variable_rolls_back_to_the_previous_model(self):
-        translator = self.make_translator({'gpt-4.1': 'Alle lof behoort toe aan Allah.'}, TRANSLATION_MODEL='gpt-4.1')
-        result = await translator._perform_translation('الحمد لله.', 'ar')
-        self.assertEqual(result, 'Alle lof behoort toe aan Allah.')
-        self.assertEqual([(fake.model, fake.requests) for fake in self.created], [('gpt-4.1', [{}])])
+    async def test_environment_variable_rolls_back_to_the_previous_models(self):
+        for model, settings in (('gpt-5.4-mini', MINI), ('gpt-4.1', {})):
+            with self.subTest(model=model):
+                translator = self.make_translator({model: 'Alle lof behoort toe aan Allah.'}, TRANSLATION_MODEL=model)
+                result = await translator._perform_translation('الحمد لله.', 'ar')
+                self.assertEqual(result, 'Alle lof behoort toe aan Allah.')
+                self.assertEqual([(fake.model, fake.requests) for fake in self.created], [(model, [settings])])
 
     async def test_inaccessible_model_falls_back_for_the_rest_of_the_session(self):
         direct = APIStatusError('Project does not have access to model', status_code=403)
         for no_access in (after_plugin_retries(403), after_plugin_retries(404), direct):
             with self.subTest(error=repr(no_access)):
-                translator = self.make_translator({'gpt-5.4-mini': no_access, 'gpt-4.1': 'Alle lof behoort toe aan Allah.'})
+                translator = self.make_translator({'gpt-6-luna': no_access, 'gpt-4.1': 'Alle lof behoort toe aan Allah.'})
                 first = await translator._perform_translation('الحمد لله.', 'ar')
                 second = await translator._perform_translation('الحمد لله.', 'ar')
                 self.assertEqual([first, second], ['Alle lof behoort toe aan Allah.'] * 2)
                 primary, fallback = self.created
-                self.assertEqual((primary.model, len(primary.requests), primary.closed), ('gpt-5.4-mini', 1, True))
+                self.assertEqual((primary.model, len(primary.requests), primary.closed), ('gpt-6-luna', 1, True))
                 self.assertEqual((fallback.model, fallback.requests), ('gpt-4.1', [{}, {}]))
                 self.assertEqual(translator.model, 'gpt-4.1')
 
     async def test_other_failures_are_not_hidden_by_the_fallback(self):
         for failure in (after_plugin_retries(500), APIConnectionError('network down')):
             with self.subTest(error=repr(failure)):
-                translator = self.make_translator({'gpt-5.4-mini': failure})
+                translator = self.make_translator({'gpt-6-luna': failure})
                 with self.assertRaises(APIError):
                     await translator._perform_translation('الحمد لله.', 'ar')
-                self.assertEqual((translator.model, len(self.created)), ('gpt-5.4-mini', 1))
+                self.assertEqual((translator.model, len(self.created)), ('gpt-6-luna', 1))
 
         # Already on the fallback model: there is nothing left to switch to.
         translator = self.make_translator({'gpt-4.1': after_plugin_retries(404)}, TRANSLATION_MODEL='gpt-4.1')
