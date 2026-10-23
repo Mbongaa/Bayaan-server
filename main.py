@@ -1211,7 +1211,11 @@ async def request_fnc(req: JobRequest):
 
 def build_worker_options() -> WorkerOptions:
     """Build LiveKit worker options with I/O-bound job load control."""
+    agent_name = os.getenv("LIVEKIT_AGENT_NAME", "").strip()
+    if not agent_name:
+        raise ValueError("LIVEKIT_AGENT_NAME must match the classroom app dispatch name")
     return WorkerOptions(
+        agent_name=agent_name,
         entrypoint_fnc=entrypoint,
         prewarm_fnc=prewarm,
         request_fnc=request_fnc,
