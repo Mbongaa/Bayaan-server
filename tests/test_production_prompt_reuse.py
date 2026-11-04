@@ -47,7 +47,9 @@ class ProductionPromptTests(unittest.IsolatedAsyncioTestCase):
         await old._initialize_prompt('ar')
         await new._initialize_prompt('ar-gemini')
         self.assertEqual(old.system_prompt, new.system_prompt)
-        self.assertIn('formal Arabic khutbahs', new.system_prompt)
+        self.assertIn('translating Arabic khutbahs (Friday sermons) into English', new.system_prompt)
+        self.assertIn('Language notes (English)', new.system_prompt)
+        self.assertNotIn('{language_notes}', new.system_prompt)
         self.assertIn('Source language note: the text you receive is Arabic speech', new.system_prompt)
         self.assertEqual(new.max_context_pairs, 12)
 
@@ -85,8 +87,26 @@ class ProductionPromptTests(unittest.IsolatedAsyncioTestCase):
         # Supabase. The two copies in this repository must never drift apart.
         translator = self.Translator(self.room, translation_language('nl', self.config.translation.supported_languages))
         self.assertEqual(translator._fallback_prompt('Arabic', 'Dutch'),
-                         self.builder.DEFAULT_PROMPT.format(source_lang='Arabic', target_lang='Dutch'))
-        self.assertIn('Whenever the text is or contains a Qur’anic ayah', self.builder.DEFAULT_PROMPT)
+                         self.builder.DEFAULT_PROMPT.format(source_lang='Arabic', target_lang='Dutch',
+                                                            language_notes=self.builder.language_notes('Dutch')))
+        self.assertIn('When the line quotes a Qur’anic ayah word for word', self.builder.DEFAULT_PROMPT)
+
+    async def test_language_notes_follow_the_target_language(self):
+        dutch = self.Translator(self.room, translation_language('nl', self.config.translation.supported_languages))
+        await dutch._initialize_prompt('ar')
+        self.assertIn('Address the congregation with "jullie", not "u"', dutch.system_prompt)
+        self.assertIn('vergeef al onze zonden', dutch.system_prompt)
+        self.assertNotIn('Language notes (English)', dutch.system_prompt)
+        self.assertEqual(self.builder.language_notes('Bengali'),
+                         self.builder.LANGUAGE_NOTES['default'].replace('{target_lang}', 'Bengali'))
+
+    async def test_direct_template_with_language_notes_slot_is_filled(self):
+        # The Khutba (Fusha) template in Supabase carries the same {language_notes} slot.
+        context = dict(translation_prompt=self.builder.DEFAULT_PROMPT)
+        translator = self.Translator(self.room, translation_language('nl', self.config.translation.supported_languages), context)
+        await translator._initialize_prompt('ar')
+        self.assertIn('Language notes (Dutch)', translator.system_prompt)
+        self.assertNotIn('{', translator.system_prompt)
 
 
 if __name__ == '__main__':

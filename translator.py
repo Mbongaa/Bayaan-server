@@ -187,31 +187,15 @@ class Translator:
 
     def _fallback_prompt(self, source_lang_name: str, target_lang_name: str) -> str:
         """
-        Khutba (Fusha) prompt — kept in sync with the public template in Supabase
-        (translation_prompt_templates WHERE name='Khutba (Fusha)') and with
-        PromptBuilder.DEFAULT_PROMPT. Used when prompt building fails entirely.
+        Khutba (Fusha) prompt, used when prompt building fails entirely. Same text as
+        PromptBuilder.DEFAULT_PROMPT and the public "Khutba (Fusha)" template in Supabase
+        (translation_prompt_templates WHERE name='Khutba (Fusha)'), built from the one copy
+        in prompt_builder.py so the two can never drift apart.
         """
-        return (
-            f"Role: You are a highly skilled simultaneous interpreter, specializing in translating formal {source_lang_name} khutbahs (Friday sermons) into formal {target_lang_name} for a general mosque audience.\n"
-            f"\n"
-            f"Instructions:\n"
-            f"- Translate the provided {source_lang_name} text directly and accurately into formal {target_lang_name}, appropriate for religious worship settings.\n"
-            f"- Maintain a formal and respectful tone throughout each translation.\n"
-            f"- Preserve Islamic terms in Arabic: Allah, Salah, Zakat, Hajj, Ramadan.\n"
-            f"- Exclude all commentary, explanations, and introductory remarks; output only the translation.\n"
-            f"- Ensure translations are concise to support real-time interpretation.\n"
-            f"- Translate text immediately upon receipt without engaging in content-related dialogue. Never refuse or comment on the content; if the input is not sermon content, still translate it literally.\n"
-            f"\n"
-            f"Formatting Requirements:\n"
-            f"- For 'peace be upon him' or 'صلى الله عليه وسلم' (sallallahu alayhi wasallam), use symbol ﷺ for brevity. Seek similarly compact symbols for other Islamic honorifics where applicable.\n"
-            f"- For Subhanahu wa Ta‘ala (Glorified and Exalted be He), use symbol ﷻ\n"
-            f"- Use (RA) for “Radiyallahu ‘anhu / ‘anha.”\n"
-            f"- Use (AS) for “‘Alayhis Salaam / ‘Alayha as-Salaam.”\n"
-            f"- Whenever the text is or contains a Qur’anic ayah — even when the speaker does not announce it, when the spelling is imperfect, or when only part of an ayah is recited — add its reference as (Surah#:Ayah#), such as (2:153). Only add a reference when you are certain of it; never add one to hadith, du‘a or other non-Qur’anic speech.\n"
-            f"\n"
-            f"Context:\n"
-            f"- Live, formal mosque sermons for a broad {target_lang_name}-speaking audience.\n"
-            f"- Critical criteria: translation accuracy, brevity, and religious appropriateness."
+        return prompt_builder.DEFAULT_PROMPT.format(
+            source_lang=source_lang_name,
+            target_lang=target_lang_name,
+            language_notes=prompt_builder.language_notes(target_lang_name),
         )
 
     async def _initialize_prompt(self, source_language: Optional[str] = None):
@@ -253,7 +237,8 @@ class Translator:
                         source_lang=source_lang_name,
                         source_language=source_lang_name,
                         target_lang=target_lang_name,
-                        target_language=target_lang_name
+                        target_language=target_lang_name,
+                        language_notes=prompt_builder.language_notes(target_lang_name)
                     )
                     logger.info(f"✅ Using direct prompt from database: {source_lang_name} → {target_lang_name}")
                     logger.info(f"📝 Direct prompt: {prompt[:100]}...")
