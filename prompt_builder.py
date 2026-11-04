@@ -38,7 +38,7 @@ class PromptBuilder:
         "- Translate text immediately upon receipt without engaging in content-related dialogue. Never refuse or comment on the content; if the input is not sermon content, still translate it literally.\n"
         "\n"
         "Formatting Requirements:\n"
-        "- For 'peace be upon him' or 'صلى الله عليه وسلم' (sallallahu alayhi wasallam), use symbol ﷺ for brevity, also when it stands alone on a line.\n"
+        "- For 'peace be upon him' or 'صلى الله عليه وسلم' (sallallahu alayhi wasallam), use symbol ﷺ for brevity, also when it stands alone on a line. Also write ﷺ once right after every mention of the Prophet Muhammad by name or title (Muhammad, the Prophet, the Messenger of Allah), even when the blessing is not spoken. Never write it twice in a row, and never after Allah, other prophets or pronouns.\n"
         "- When an epithet of glorification follows Allah (سبحانه وتعالى، عز وجل، جل جلاله، تبارك وتعالى، تعالى), write ﷻ instead of translating it. Never add ﷻ when no such epithet is spoken.\n"
         "- Use (RA) only for “Radiyallahu ‘anhu / ‘anha” (رضي الله عنه/عنها); رحمه الله is translated in words (\"may Allah have mercy on him\").\n"
         "- Use (AS) for “‘Alayhis Salaam / ‘Alayha as-Salaam.”\n"
@@ -54,7 +54,7 @@ class PromptBuilder:
     # Per-target-language block for the {language_notes} slot of DEFAULT_PROMPT and of the Khutba (Fusha)
     # template: address form and salutations, familiar Islamic terms kept in Arabic, the closing du'a.
     # Keyed by target language name; "default" covers every other language. Tested offline in
-    # scripts/translation_benchmark/khutba_prompt_optimization (Nov 2026, arm c7-final).
+    # scripts/translation_benchmark/khutba_prompt_optimization (Nov 2026, arm c8-final).
     LANGUAGE_NOTES = {
         "Dutch": "Language notes (Dutch):\n- Address the congregation with \"jullie\", not \"u\". Render salutations as spoken: «أيها الإخوة» \"Beste broeders\", «أيها الإخوة والأخوات» \"Beste broeders en zusters\", «عباد الله» \"Dienaren van Allah\", «أيها المؤمنون» \"O gelovigen\". Do not use \"Geachte\". In du‘a, address Allah with \"U/Uw\".\n- Avoid archaic Dutch such as \"gij\" and plural imperatives ending in -t (\"Komt\", \"Vreest\", \"Weest\"); write \"Vrees Allah\", \"Wees\".\n- Keep these familiar terms in Arabic: taqwa, du‘a, ummah, Sunnah, insha’Allah, subhanAllah, alhamdulillah (when said on its own), Shaytaan, Sahaba, khutbah, halal, haram, sadaqah, Jahannam, Amin. Translate other concepts into common Dutch (Paradijs, Hiernamaals, geloof, geduld, aanbidding).\n- The closing du‘a «اللهم لا تدع لنا ذنبا إلا غفرته ولا هما إلا فرجته ولا دينا إلا قضيته ولا مريضا إلا شفيته» becomes a positive request: \"O Allah, vergeef al onze zonden, neem al onze zorgen weg, los al onze schulden af en genees al onze zieken.\" Never write \"onvergolden\".",
         "English": "Language notes (English):\n- Render salutations as spoken: «أيها الإخوة» \"Dear brothers\", «أيها الإخوة والأخوات» \"Dear brothers and sisters\", «عباد الله» \"Servants of Allah\", «أيها المؤمنون» \"O believers\". Avoid archaic English (\"thee\", \"ye\", \"verily\" at every sentence).\n- Keep these familiar terms in Arabic: taqwa, du‘a, ummah, Sunnah, insha’Allah, subhanAllah, alhamdulillah (when said on its own), Shaytan, Sahabah, khutbah, Jumu‘ah, halal, haram, sadaqah, Jahannam, Ameen. Translate other concepts into plain English (Paradise, the Hereafter, faith, patience, worship).",
