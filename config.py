@@ -159,15 +159,16 @@ class TranslationConfig:
     def llm_settings(self, model: str) -> Dict[str, Any]:
         """Request settings for a translation model.
 
-        gpt-6-luna runs with thinking off, temperature 0 and Fast processing (service_tier
-        "priority"): in the October 2026 benchmark it translated real khutbahs better than
-        gpt-5.4-mini at the same speed (about 1.1 s per caption). gpt-5.4-mini keeps the
-        settings it was tuned with, for rollback. Other models are called with API defaults
+        gpt-6-luna thinks briefly before answering (reasoning_effort "low") with Fast processing
+        (service_tier "priority"). In the November 2026 khutba tests this cut critical errors
+        (reversed rulings, lost negations, wrong speaker) by more than half for about 0.1 s more
+        per caption. The API refuses temperature 0 when reasoning is on, so none is sent.
+        gpt-5.4-mini keeps the settings it was tuned with, for rollback. Other models are called with API defaults
         because they reject these settings (gpt-4.1 refuses reasoning_effort), so rolling
         back only needs TRANSLATION_MODEL.
         """
         if model.startswith("gpt-6-luna"):
-            return {"temperature": 0, "reasoning_effort": "none", "service_tier": "priority"}
+            return {"reasoning_effort": "low", "service_tier": "priority"}
         if model.startswith("gpt-5.4-mini"):
             return {"temperature": 0, "reasoning_effort": "none"}
         return {}

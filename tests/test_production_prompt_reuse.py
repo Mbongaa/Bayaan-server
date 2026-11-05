@@ -96,6 +96,7 @@ class ProductionPromptTests(unittest.IsolatedAsyncioTestCase):
         await dutch._initialize_prompt('ar')
         self.assertIn('Address the congregation with "jullie", not "u"', dutch.system_prompt)
         self.assertIn('vergeef al onze zonden', dutch.system_prompt)
+        self.assertIn('kan door niemand worden misleid', dutch.system_prompt)  # fixed opening formula
         self.assertNotIn('Language notes (English)', dutch.system_prompt)
         self.assertEqual(self.builder.language_notes('Bengali'),
                          self.builder.LANGUAGE_NOTES['default'].replace('{target_lang}', 'Bengali'))

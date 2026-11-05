@@ -300,6 +300,17 @@ class Translator:
             await self._switch_to_fallback_model(e)
             translated_message = await self._run_llm(temp_context)
 
+        # With reasoning on, the model very occasionally answers with cleaned-up Arabic instead of a
+        # translation (about 1 caption in 6,000 in the Nov 2026 khutba tests). Asking again gives the
+        # target language, so retry before a visitor sees Arabic on the screen.
+        retries = 0
+        while (retries < self.ARABIC_OUTPUT_RETRIES and not self.lang.value.startswith('ar')
+               and self._mostly_arabic_script(translated_message)):
+            retries += 1
+            logger.warning(f"⚠️ {self.lang.value} translation came back in Arabic script, asking again "
+                           f"({retries}/{self.ARABIC_OUTPUT_RETRIES}): '{translated_message[:80]}'")
+            translated_message = await self._run_llm(temp_context)
+
         # If using context, update our history (deque will auto-remove old messages)
         if self.use_context and translated_message:
             self.message_history.append({"role": "user", "content": message})
@@ -307,6 +318,16 @@ class Translator:
             logger.debug(f"💾 History updated. Current size: {len(self.message_history)} messages")
         
         return translated_message
+
+    ARABIC_OUTPUT_RETRIES = 2
+
+    @staticmethod
+    def _mostly_arabic_script(text: str) -> bool:
+        """True when most letters of a caption are Arabic script (ﷺ and ﷻ do not count)."""
+        letters = [ch for ch in text or '' if ch.isalpha() and ch not in 'ﷺﷻ']
+        arabic = sum(1 for ch in letters if '\u0600' <= ch <= '\u06ff' or '\u0750' <= ch <= '\u077f'
+                     or '\ufb50' <= ch <= '\ufdff' or '\ufe70' <= ch <= '\ufeff')
+        return bool(letters) and arabic > 0.3 * len(letters)
 
     async def _run_llm(self, chat_ctx) -> str:
         """Stream one completion from the current model and return its text."""

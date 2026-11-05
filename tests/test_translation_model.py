@@ -17,7 +17,7 @@ from config import TranslationConfig
 from language_routing import translation_language
 from test_production_prompt_reuse import SERVER, load_class
 
-LUNA = {'temperature': 0, 'reasoning_effort': 'none', 'service_tier': 'priority'}
+LUNA = {'reasoning_effort': 'low', 'service_tier': 'priority'}  # reasoning on: the API refuses temperature 0
 MINI = {'temperature': 0, 'reasoning_effort': 'none'}
 
 
@@ -58,7 +58,8 @@ class FakeLLM:
 
     def chat(self, *, chat_ctx, extra_kwargs):
         self.requests.append(extra_kwargs)
-        return FakeStream(self.outcome)
+        # a list gives one outcome per request, in order
+        return FakeStream(self.outcome.pop(0) if isinstance(self.outcome, list) else self.outcome)
 
     async def aclose(self):
         self.closed = True
@@ -126,6 +127,22 @@ class TranslationModelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((primary.model, len(primary.requests), primary.closed), ('gpt-6-luna', 1, True))
                 self.assertEqual((fallback.model, fallback.requests), ('gpt-4.1', [{}, {}]))
                 self.assertEqual(translator.model, 'gpt-4.1')
+
+    async def test_caption_in_arabic_script_is_asked_again(self):
+        arabic = 'لا تناديه باسمه، ولا تجلس قبله، ولا تمش أمامه وهو خلفك.'
+        dutch = 'Noem hem niet bij zijn naam, ga niet vóór hem zitten en loop niet vóór hem uit.'
+        translator = self.make_translator({'gpt-6-luna': [arabic, dutch]})
+        result = await translator._perform_translation('لا تناديه باسمه ولا تجلس قبله', 'ar')
+        self.assertEqual(result, dutch)
+        self.assertEqual(len(self.created[0].requests), 2)
+        # Captions with only ﷺ/ﷻ or a quoted Arabic word are normal and are not retried.
+        translator = self.make_translator({'gpt-6-luna': 'De Profeet ﷺ zei: «ديال» betekent "van".'})
+        await translator._perform_translation('قال النبي صلى الله عليه وسلم', 'ar')
+        self.assertEqual(len(self.created[0].requests), 1)
+        # Retries are capped: a stubborn Arabic answer is returned after two extra requests.
+        translator = self.make_translator({'gpt-6-luna': [arabic, arabic, arabic, dutch]})
+        self.assertEqual(await translator._perform_translation('لا تناديه باسمه', 'ar'), arabic)
+        self.assertEqual(len(self.created[0].requests), 3)
 
     async def test_other_failures_are_not_hidden_by_the_fallback(self):
         for failure in (after_plugin_retries(500), APIConnectionError('network down')):
