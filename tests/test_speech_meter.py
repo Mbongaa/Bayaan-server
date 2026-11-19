@@ -75,7 +75,8 @@ class SpeechMeterTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(post.bodies[0], post.bodies[1])
 
     async def test_rejected_report_is_final(self):
-        for status in (400, 401):
+        # 307: CLASSROOM_APP_URL points at a redirecting host.
+        for status in (307, 400, 401):
             with self.subTest(status=status):
                 post = Recorder(status)
                 meter = self.meter(post)

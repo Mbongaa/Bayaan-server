@@ -154,7 +154,10 @@ def _http_poster(endpoint: str, secret: str) -> Poster:
 
     async def post(body: dict) -> int:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(endpoint, json=body, headers=headers) as response:
+            # A redirect (e.g. bayaan.app -> www.bayaan.app) would drop the
+            # Authorization header; report it as a misconfigured URL instead.
+            async with session.post(endpoint, json=body, headers=headers,
+                                    allow_redirects=False) as response:
                 return response.status
 
     return post
