@@ -54,6 +54,9 @@ from language_routing import transcription_route, translation_language
 # Import resource management
 from resource_management import ResourceManager, TaskManager, STTStreamManager
 
+# Minutes with processed speech, reported to the classroom app for billing
+from speech_meter import speech_meter_for_room
+
 # Import webhook handler for room context
 try:
     from webhook_handler import get_room_context as get_webhook_room_context
@@ -522,7 +525,11 @@ async def entrypoint(job: JobContext):
     draining_tasks: Set[asyncio.Task] = set()
     cleanup_lock = asyncio.Lock()
     shared_cleanup_task: Optional[asyncio.Task] = None
-    
+
+    # The classroom app bills translation on the minutes in which this worker
+    # published speech (speech_meter.py); off unless the app URL and secret are set.
+    speech_meter = speech_meter_for_room(job.room.name if job.room else None)
+
     logger.info(f"🚀 Starting entrypoint for room: {job.room.name if job.room else 'unknown'}")
     logger.info(f"🔍 Translators dict ID: {id(translators)}")
     logger.info("Configuration: %s -> %s", source_language, target_language)
@@ -570,7 +577,8 @@ async def entrypoint(job: JobContext):
                                 job.room.local_participant.identity, "", [final_segment]
                             )
                             await job.room.local_participant.publish_transcription(final_transcription)
-                            
+                            speech_meter.mark()
+
                             logger.info(f"✅ Published final {track_language_name} transcription: '{final_text}'")
                         except Exception as e:
                             logger.error(f"❌ Failed to publish final transcription: {str(e)}")
@@ -645,6 +653,8 @@ async def entrypoint(job: JobContext):
                     start_time=0, end_time=0, language=language, final=final)
                 await job.room.local_participant.publish_transcription(
                     rtc.Transcription(job.room.local_participant.identity, '', [segment]))
+                if text and text.strip():
+                    speech_meter.mark()
 
             async def heartbeat():
                 await resource_manager.heartbeat_monitor.update_heartbeat(
@@ -998,6 +1008,7 @@ async def entrypoint(job: JobContext):
                 logger.warning('Ignoring invalid requested translation language')
     logger.info(f"Successfully connected to room: {job.room.name}")
     logger.info(f"📡 Real-time transcription data will be sent via LiveKit publish_transcription")
+    speech_meter.start()
     
     # Start the heartbeat task after connection
     if tenant_context.get('session_id') and (heartbeat_task is None or heartbeat_task.done()):
@@ -1061,7 +1072,10 @@ async def entrypoint(job: JobContext):
                     _, still_pending = await asyncio.wait(pending, timeout=10)
                     if still_pending:
                         logger.error('Track cleanup incomplete for %s task(s)', len(still_pending))
-            
+
+            # Every track has drained: report the last speech minutes (5 s budget).
+            await speech_meter.aclose()
+
             if heartbeat_task and not heartbeat_task.done():
                 heartbeat_task.cancel()
                 try:

@@ -91,9 +91,11 @@ def assert_isolated_environment() -> None:
     }
     if any(os.environ.get(key) != value for key, value in expected.items()):
         raise RuntimeError("Local preview requires its fixed localhost environment.")
-    if any(key.startswith("CLASSROOM_SUPABASE_") or key in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"}
-           for key in os.environ):
-        raise RuntimeError("Local preview refuses inherited database or proxy configuration.")
+    # The speech meter would report local minutes to the production classroom app.
+    if any(key.startswith("CLASSROOM_SUPABASE_") or key in {
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "CLASSROOM_APP_URL", "SPEECH_METER_SECRET",
+    } for key in os.environ):
+        raise RuntimeError("Local preview refuses inherited database, billing or proxy configuration.")
 
 
 async def _no_database_result(*args, **kwargs):

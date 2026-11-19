@@ -38,6 +38,7 @@ class RoomShutdownTests(unittest.IsolatedAsyncioTestCase):
         self.translator_close = AsyncMock(side_effect=lambda: self.order.append('translator'))
         self.provider_close = AsyncMock(side_effect=lambda: self.order.append('provider'))
         self.close_session = AsyncMock(side_effect=lambda _: self.order.append('session'))
+        self.meter_close = AsyncMock(side_effect=lambda: self.order.append('meter'))
         self.room = SimpleNamespace(disconnect=AsyncMock(side_effect=lambda: self.order.append('disconnect')))
         self.job = SimpleNamespace(room=self.room, _shutdown_callbacks=[])
         # This is the real installed Agents1.2.1 method, not a guessed fake API.
@@ -50,7 +51,8 @@ class RoomShutdownTests(unittest.IsolatedAsyncioTestCase):
             transcript_accumulators={}, translators={'en': SimpleNamespace(close=self.translator_close)},
             stt_providers={'ar-gemini': SimpleNamespace(aclose=self.provider_close)},
             tenant_context={'session_id': 'tenant-session'}, close_room_session=self.close_session,
-            close_database_connections=AsyncMock())
+            close_database_connections=AsyncMock(),
+            speech_meter=SimpleNamespace(aclose=self.meter_close))
         self.cleanup = cleanup_factory(self.namespace)
 
     async def draining_track(self):
@@ -86,9 +88,11 @@ class RoomShutdownTests(unittest.IsolatedAsyncioTestCase):
         self.translator_close.assert_not_awaited()
         self.provider_close.assert_not_awaited()
         self.close_session.assert_not_awaited()
+        self.meter_close.assert_not_awaited()
         release.set()
         await asyncio.gather(frontend, shutdown)
-        self.assertEqual(self.order, ['track-drained', 'translator', 'provider', 'session', 'disconnect'])
+        # Speech minutes are reported once the last track has drained.
+        self.assertEqual(self.order, ['track-drained', 'meter', 'translator', 'provider', 'session', 'disconnect'])
         self.close_session.assert_awaited_once_with('frontend-session')
         self.resource_manager.shutdown.assert_awaited_once()
 
@@ -106,7 +110,7 @@ class RoomShutdownTests(unittest.IsolatedAsyncioTestCase):
         release.set()
         await shutdown
         self.close_session.assert_awaited_once_with('tenant-session')
-        self.assertEqual(self.order, ['track-drained', 'translator', 'provider', 'session'])
+        self.assertEqual(self.order, ['track-drained', 'meter', 'translator', 'provider', 'session'])
 
     async def test_shutdown_callback_alone_runs_cleanup_and_later_calls_wait_for_same_result(self):
         await self.job._shutdown_callbacks[0]('worker stopping')
@@ -114,6 +118,7 @@ class RoomShutdownTests(unittest.IsolatedAsyncioTestCase):
         await self.job._shutdown_callbacks[0]('second shutdown notification')
         self.translator_close.assert_awaited_once()
         self.provider_close.assert_awaited_once()
+        self.meter_close.assert_awaited_once()
         self.close_session.assert_awaited_once_with('tenant-session')
         self.namespace['close_database_connections'].assert_awaited_once()
         self.resource_manager.verify_cleanup_complete.assert_awaited_once()
