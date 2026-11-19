@@ -4,21 +4,33 @@ The classroom app bills translation on these minutes, and only while a host is
 connected, so waiting before a lecture, silence and breaks cost nothing. A
 minute counts once at least one non-empty transcription was published in it.
 
-Reports go to the classroom app (POST {CLASSROOM_APP_URL}/api/v2/speech-minutes,
-authorised with SPEECH_METER_SECRET) as sets of whole UTC minutes, numbered
-as seconds since the epoch divided by 60. Sets make every report idempotent:
-a retry, or a second worker in the same room, never counts a minute twice.
-Without both settings the meter is off and the worker runs as before.
+Reports go to the classroom app (POST {CLASSROOM_APP_URL}/api/v2/speech-minutes)
+as sets of whole UTC minutes, numbered as seconds since the epoch divided by
+60. Sets make every report idempotent: a retry, or a second worker in the same
+room, never counts a minute twice.
+
+Each report carries a short-lived LiveKit token signed with this worker's
+LIVEKIT_API_KEY/LIVEKIT_API_SECRET, for the meter identity and that one room,
+without permission to join it. The app checks it with the same LiveKit project
+key, so no extra secret is needed; only the translation server can add
+billable minutes. CLASSROOM_APP_URL defaults to the production app.
 """
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 import logging
 import os
 import time
 from typing import Awaitable, Callable, Optional
 
 logger = logging.getLogger("speech-meter")
+
+# Production app host. bayaan.app redirects here, and a redirect would drop the token.
+DEFAULT_APP_URL = "https://www.bayaan.app"
+# Identity of the meter's report tokens; the app accepts reports only from it.
+METER_IDENTITY = "bayaan-speech-meter"
+TOKEN_TTL = timedelta(minutes=5)
 
 FLUSH_INTERVAL_SECONDS = 30.0
 MAX_MINUTES_PER_REPORT = 240
@@ -118,7 +130,7 @@ class SpeechMeter:
                 else:
                     logger.error(
                         "Speech minutes for room %s rejected (HTTP %s); dropped %s minute(s). "
-                        "Check CLASSROOM_APP_URL and SPEECH_METER_SECRET.",
+                        "Check CLASSROOM_APP_URL and that this worker uses the app's LiveKit project key.",
                         self._room_name, status, len(batch),
                     )
                     self._pending.difference_update(batch)
@@ -146,13 +158,26 @@ class SpeechMeter:
             logger.exception("Final speech meter flush failed for room %s", self._room_name)
 
 
-def _http_poster(endpoint: str, secret: str) -> Poster:
+def report_token(room_name: str, api_key: str, api_secret: str) -> str:
+    """A short-lived LiveKit token that can only report minutes for this room."""
+    from livekit import api
+
+    return (
+        api.AccessToken(api_key, api_secret)
+        .with_identity(METER_IDENTITY)
+        .with_grants(api.VideoGrants(room=room_name, room_join=False))
+        .with_ttl(TOKEN_TTL)
+        .to_jwt()
+    )
+
+
+def _http_poster(endpoint: str, room_name: str, api_key: str, api_secret: str) -> Poster:
     import aiohttp
 
     timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
-    headers = {"Authorization": f"Bearer {secret}"}
 
     async def post(body: dict) -> int:
+        headers = {"Authorization": f"Bearer {report_token(room_name, api_key, api_secret)}"}
         async with aiohttp.ClientSession(timeout=timeout) as session:
             # A redirect (e.g. bayaan.app -> www.bayaan.app) would drop the
             # Authorization header; report it as a misconfigured URL instead.
@@ -164,15 +189,21 @@ def _http_poster(endpoint: str, secret: str) -> Poster:
 
 
 def speech_meter_for_room(room_name: Optional[str], env=None) -> SpeechMeter:
-    """The meter for one room, or a disabled one when reporting is not configured."""
+    """The meter for one room, or a disabled one when it cannot or must not report."""
     env = os.environ if env is None else env
-    app_url = (env.get("CLASSROOM_APP_URL") or "").strip().rstrip("/")
-    secret = (env.get("SPEECH_METER_SECRET") or "").strip()
     room = room_name or ""
-    if not (app_url and secret and room):
+    if env.get("BAYAAN_LOCAL_PREVIEW") == "1":
+        # Local rooms must never be reported to the production app.
+        return SpeechMeter(room, None)
+    app_url = (env.get("CLASSROOM_APP_URL") or DEFAULT_APP_URL).strip().rstrip("/")
+    api_key = (env.get("LIVEKIT_API_KEY") or "").strip()
+    api_secret = (env.get("LIVEKIT_API_SECRET") or "").strip()
+    if not (room and api_key and api_secret):
         logger.warning(
-            "Speech meter off for room %s: CLASSROOM_APP_URL and SPEECH_METER_SECRET must both be set",
+            "Speech meter off for room %s: LIVEKIT_API_KEY and LIVEKIT_API_SECRET are required",
             room or "unknown",
         )
         return SpeechMeter(room, None)
-    return SpeechMeter(room, _http_poster(f"{app_url}/api/v2/speech-minutes", secret))
+    return SpeechMeter(
+        room, _http_poster(f"{app_url}/api/v2/speech-minutes", room, api_key, api_secret)
+    )

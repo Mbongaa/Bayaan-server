@@ -142,21 +142,35 @@ class SpeechMeterTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(meter.aclose(), timeout=2)
         self.assertEqual(meter.pending_minutes, [MINUTE])
 
-    def test_off_without_app_url_and_secret(self):
-        for env in ({}, {'CLASSROOM_APP_URL': 'https://app.example'},
-                    {'SPEECH_METER_SECRET': 'secret'}):
+    def test_off_without_livekit_keys_or_in_local_preview(self):
+        keys = {'LIVEKIT_API_KEY': 'APIkey', 'LIVEKIT_API_SECRET': 'secret'}
+        for env in ({}, {'LIVEKIT_API_KEY': 'APIkey'}, {'LIVEKIT_API_SECRET': 'secret'},
+                    {**keys, 'BAYAAN_LOCAL_PREVIEW': '1'}):
             with self.subTest(env=env):
                 meter = speech_meter_for_room('room-1', env)
                 self.assertFalse(meter.enabled)
                 meter.mark()
                 self.assertEqual(meter.pending_minutes, [])
-        self.assertFalse(speech_meter_for_room(None, {
-            'CLASSROOM_APP_URL': 'https://app.example', 'SPEECH_METER_SECRET': 'secret'}).enabled)
+        self.assertFalse(speech_meter_for_room(None, keys).enabled)
 
-    def test_on_with_app_url_and_secret(self):
-        meter = speech_meter_for_room('room-1', {
-            'CLASSROOM_APP_URL': 'https://app.example/', 'SPEECH_METER_SECRET': 'secret'})
+    def test_on_with_the_workers_livekit_keys_and_no_extra_settings(self):
+        meter = speech_meter_for_room('room-1', {'LIVEKIT_API_KEY': 'APIkey', 'LIVEKIT_API_SECRET': 'secret'})
         self.assertTrue(meter.enabled)
+        self.assertEqual(speech_meter.DEFAULT_APP_URL, 'https://www.bayaan.app')
+
+    def test_report_token_only_covers_reporting_for_one_room(self):
+        import jwt
+
+        secret = 's' * 40
+        token = speech_meter.report_token('room-1', 'APIkey', secret)
+        claims = jwt.decode(token, secret, algorithms=['HS256'])
+        self.assertEqual(claims['iss'], 'APIkey')
+        self.assertEqual(claims['sub'], 'bayaan-speech-meter')
+        self.assertEqual(claims['video']['room'], 'room-1')
+        self.assertFalse(claims['video'].get('roomJoin', False))
+        self.assertLessEqual(claims['exp'] - claims['nbf'], 5 * 60)
+        with self.assertRaises(jwt.InvalidSignatureError):
+            jwt.decode(token, 'o' * 40, algorithms=['HS256'])
 
 
 class WorkerWiringTests(unittest.TestCase):

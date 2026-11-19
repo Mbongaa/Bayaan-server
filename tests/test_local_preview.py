@@ -17,7 +17,7 @@ class PreviewIsolationTests(unittest.TestCase):
             "PATH": "system-path", "LIVEKIT_URL": "wss://production.example",
             "SUPABASE_SERVICE_ROLE_KEY": "production-db", "CLASSROOM_SUPABASE_URL": "remote",
             "OPENAI_API_KEY": "inherited-key", "HTTPS_PROXY": "http://remote-proxy",
-            "CLASSROOM_APP_URL": "https://app.example", "SPEECH_METER_SECRET": "production-secret",
+            "CLASSROOM_APP_URL": "https://app.example",
         }
         env = preview.build_environment(inherited, {"OPENAI_API_KEY": "explicit-lab-key",
             "LIVEKIT_URL": "wss://ignored.example", "CLASSROOM_SUPABASE_URL": "ignored"})
@@ -29,7 +29,6 @@ class PreviewIsolationTests(unittest.TestCase):
         self.assertNotIn("CLASSROOM_SUPABASE_URL", env)
         self.assertNotIn("HTTPS_PROXY", env)
         self.assertNotIn("CLASSROOM_APP_URL", env)
-        self.assertNotIn("SPEECH_METER_SECRET", env)
         self.assertEqual(env["PYTHON_DOTENV_DISABLED"], "1")
 
     def test_missing_explicit_model_key_does_not_fall_back_to_inherited_secret(self):
@@ -41,8 +40,7 @@ class PreviewIsolationTests(unittest.TestCase):
                            ("SUPABASE_URL", "https://db.example"),
                            ("PYTHON_DOTENV_DISABLED", "0"),
                            ("HTTPS_PROXY", "http://proxy"),
-                           ("CLASSROOM_APP_URL", "https://app.example"),
-                           ("SPEECH_METER_SECRET", "production-secret")):
+                           ("CLASSROOM_APP_URL", "https://app.example")):
             with self.subTest(key=key), patch.dict(os.environ, {**env, key: value}, clear=True):
                 with self.assertRaises(RuntimeError):
                     preview.assert_isolated_environment()

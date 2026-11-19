@@ -93,7 +93,7 @@ def assert_isolated_environment() -> None:
         raise RuntimeError("Local preview requires its fixed localhost environment.")
     # The speech meter would report local minutes to the production classroom app.
     if any(key.startswith("CLASSROOM_SUPABASE_") or key in {
-        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "CLASSROOM_APP_URL", "SPEECH_METER_SECRET",
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "CLASSROOM_APP_URL",
     } for key in os.environ):
         raise RuntimeError("Local preview refuses inherited database, billing or proxy configuration.")
 
