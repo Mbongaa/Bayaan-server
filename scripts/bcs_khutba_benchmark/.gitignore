@@ -1,0 +1,7 @@
+runs/
+audio/
+judge/
+tx/
+logs/
+.openai.env
+__pycache__/
