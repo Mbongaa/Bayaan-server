@@ -6,6 +6,7 @@ module owns one track and drains its confirmed text before releasing resources.
 import asyncio
 import logging
 import math
+import time
 
 from livekit import rtc
 
@@ -18,6 +19,47 @@ logger = logging.getLogger('transcriber.gemini_track')
 # oldest frames when full; 100 frames previously retained only about one second.
 GEMINI_AUDIO_FRAME_MS = 10
 GEMINI_AUDIO_QUEUE_FRAMES = 3000
+
+# A stream that exhausts its own 90-second recovery (for example Google refusing
+# new connections at the 480-second rotation) used to end captions for the rest of
+# the session. The same live track is restarted instead; only the audio retained
+# during that outage is lost. A run that stayed healthy this long resets the count.
+GEMINI_TRACK_MAX_RESTARTS = 10
+GEMINI_TRACK_HEALTHY_SECONDS = 120.0
+GEMINI_TRACK_RESTART_MAX_DELAY = 15.0
+
+
+async def run_gemini_track_with_restarts(*, still_current, max_restarts=GEMINI_TRACK_MAX_RESTARTS,
+                                         healthy_seconds=GEMINI_TRACK_HEALTHY_SECONDS,
+                                         max_delay=GEMINI_TRACK_RESTART_MAX_DELAY,
+                                         run=None, sleep=asyncio.sleep, clock=time.monotonic,
+                                         **track_options):
+    """Run ``run_gemini_track`` and start a fresh pipeline for the same track after a failure.
+
+    ``still_current()`` must say whether this task still owns the track; unpublish,
+    unsubscribe and disconnect cancel the task, which always propagates. The last
+    error is raised once restarts are exhausted, so the caller reports the failure.
+    """
+    run = run or run_gemini_track
+    failures = 0
+    while True:
+        started = clock()
+        try:
+            return await run(**track_options)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            if clock() - started >= healthy_seconds:
+                failures = 0
+            failures += 1
+            if failures > max_restarts or not still_current():
+                raise
+            delay = min(max_delay, 2 ** (failures - 1))
+            logger.warning('Gemini track pipeline failed (%s); restarting it for the same track in %.0fs '
+                           '(restart %d/%d)', type(error).__name__, delay, failures, max_restarts, exc_info=True)
+            await sleep(delay)
+            if not still_current():
+                raise
 
 
 async def run_gemini_track(*, participant, track, provider, publish, translate,

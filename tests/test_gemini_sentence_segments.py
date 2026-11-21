@@ -41,6 +41,20 @@ class SentenceSegmentsTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(split_complete_sentences(text), ([], text))
 
+    def test_ordinals_and_lowercase_continuations_do_not_end_sentences(self):
+        cases = [
+            ('Obilježili smo 31. godišnjicu genocida. Mi', ['Obilježili smo 31. godišnjicu genocida.'], 'Mi'),
+            ('tokom ljeta 1992. godine u Prijedoru, i', [], 'tokom ljeta 1992. godine u Prijedoru, i'),
+            ('Allah kaže u 34. ajetu: Vjerujte. A', ['Allah kaže u 34. ajetu: Vjerujte.'], 'A'),
+            ('Allah, dž.š., kaže: Vjerujte. Mi', ['Allah, dž.š., kaže: Vjerujte.'], 'Mi'),
+            ('Bilo je to 1992. Tada', ['Bilo je to 1992.'], 'Tada'),
+            ('Yes... yes. No', ['Yes... yes.'], 'No'),
+            ('تلك سنة 1992. ثم', ['تلك سنة 1992.'], 'ثم'),
+        ]
+        for text, sentences, tail in cases:
+            with self.subTest(text=text):
+                self.assertEqual(split_complete_sentences(text), (sentences, tail))
+
     def test_punctuation_runs_and_repeated_sentences(self):
         self.assertEqual(split_complete_sentences('Really?! Yes... Yes... Next'),
                          (['Really?!', 'Yes...', 'Yes...'], 'Next'))

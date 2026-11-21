@@ -53,6 +53,25 @@ class ProductionPromptTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Source language note: the text you receive is Arabic speech', new.system_prompt)
         self.assertEqual(new.max_context_pairs, 12)
 
+    async def test_bosnian_source_notes_precede_the_source_note_for_any_prompt(self):
+        lang = translation_language('nl', self.config.translation.supported_languages)
+        for context in (None, dict(translation_prompt='Translate {source_lang} into {target_lang}.')):
+            with self.subTest(direct_prompt=bool(context)):
+                bosnian = self.Translator(self.room, lang, context)
+                await bosnian._initialize_prompt('bs')
+                prompt = bosnian.system_prompt
+                self.assertIn('Source notes (Bosnian):', prompt)
+                self.assertIn('«dželle šanuhu»', prompt)
+                self.assertLess(prompt.index('Source notes (Bosnian):'),
+                                prompt.index('Source language note: the text you receive is Bosnian speech'))
+                arabic = self.Translator(self.room, lang, context)
+                await arabic._initialize_prompt('ar')
+                self.assertNotIn('Source notes', arabic.system_prompt)
+        croatian = self.Translator(self.room, lang)
+        await croatian._initialize_prompt('hr')
+        self.assertIn('Source notes (Croatian):', croatian.system_prompt)
+        self.assertNotIn('{source_lang}', croatian.system_prompt)
+
     async def test_direct_room_prompt_and_context_override_are_preserved(self):
         context = dict(translation_prompt='Translate {source_lang} into {target_lang}; retain Quran citations.', context_window_size=6)
         old = self.Translator(self.room, translation_language('nl', self.config.translation.supported_languages), context)

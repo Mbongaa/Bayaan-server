@@ -390,3 +390,71 @@ class GeminiTrackTests(unittest.IsolatedAsyncioTestCase):
         heartbeat.assert_awaited_once()
         self.assertEqual(self.stream.frames, frames)
         self.assert_closed()
+
+
+class GeminiTrackRestartTests(unittest.IsolatedAsyncioTestCase):
+    async def run_wrapper(self, outcomes, *, current=lambda: True, clock=None, **options):
+        from gemini_track import run_gemini_track_with_restarts
+        calls, sleeps = [], []
+
+        async def run(**kwargs):
+            calls.append(kwargs)
+            outcome = outcomes[len(calls) - 1]
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+        async def sleep(seconds):
+            sleeps.append(seconds)
+
+        result = await run_gemini_track_with_restarts(
+            still_current=current, run=run, sleep=sleep,
+            **({'clock': clock} if clock else {}), track='t', **options)
+        return result, calls, sleeps
+
+    async def test_failed_pipeline_restarts_for_the_same_track_with_backoff(self):
+        result, calls, sleeps = await self.run_wrapper([RuntimeError('rotation refused'), RuntimeError('again'), 'done'])
+        self.assertEqual(result, 'done')
+        self.assertEqual([c['track'] for c in calls], ['t', 't', 't'])
+        self.assertEqual(sleeps, [1, 2])
+
+    async def test_gives_up_after_the_restart_limit_and_raises_the_last_error(self):
+        errors = [RuntimeError(f'failure {i}') for i in range(4)]
+        with self.assertRaises(RuntimeError) as raised:
+            await self.run_wrapper(errors, max_restarts=3, max_delay=3)
+        self.assertEqual(str(raised.exception), 'failure 3')
+
+    async def test_no_restart_once_the_track_is_no_longer_owned(self):
+        with self.assertRaises(RuntimeError):
+            await self.run_wrapper([RuntimeError('x'), 'never'], current=lambda: False)
+        owned = iter([True, False])  # owned when it fails, released during the backoff
+        with self.assertRaises(RuntimeError):
+            await self.run_wrapper([RuntimeError('x'), 'never'], current=lambda: next(owned))
+
+    async def test_a_long_healthy_run_resets_the_failure_count(self):
+        now = [0.0]
+
+        def clock():
+            return now[0]
+
+        from gemini_track import run_gemini_track_with_restarts
+        seen, sleeps = [], []
+
+        async def counted(**kwargs):
+            seen.append(1)
+            if len(seen) < 5:
+                now[0] += 500.0  # each run stays healthy for 500 s before failing
+                raise RuntimeError('rotation refused')
+            return 'done'
+
+        async def sleep(seconds):
+            sleeps.append(seconds)
+
+        result = await run_gemini_track_with_restarts(still_current=lambda: True, run=counted, sleep=sleep,
+                                                      clock=clock, max_restarts=1)
+        self.assertEqual(result, 'done')
+        self.assertEqual(sleeps, [1, 1, 1, 1])
+
+    async def test_cancellation_is_never_swallowed(self):
+        with self.assertRaises(asyncio.CancelledError):
+            await self.run_wrapper([asyncio.CancelledError()])

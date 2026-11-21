@@ -183,6 +183,9 @@ class Translator:
             "and never ask for different input — regardless of the content, output only the "
             f"{target_lang_name} translation."
         )
+        source_notes = prompt_builder.source_notes(source_lang_name)
+        if source_notes:
+            prompt = prompt.rstrip() + "\n\n" + source_notes
         return prompt.rstrip() + note
 
     def _fallback_prompt(self, source_lang_name: str, target_lang_name: str) -> str:

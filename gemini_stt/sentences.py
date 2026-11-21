@@ -20,6 +20,16 @@ _ABBREVIATIONS = frozenset({
 def _period_ends(text: str, index: int) -> bool:
     before = text[index - 1] if index else ''
     after = text[index + 1] if index + 1 < len(text) else ''
+    # A period followed (after spaces/punctuation) by a lowercase letter or a comma,
+    # semicolon or colon continues the sentence: ordinals such as Bosnian/Croatian
+    # "31. godišnjicu", "ljeta 1992. godine", "u 34. ajetu" and dotted abbreviations
+    # such as "dž.š., kaže". Scripts without letter case (Arabic) are unaffected.
+    following = index + 1
+    while following < len(text) and (text[following] in _ENDINGS or text[following] in _CLOSERS
+                                      or text[following].isspace()):
+        following += 1
+    if following < len(text) and (text[following].islower() or text[following] in ',;:'):
+        return False
     # isdecimal includes Arabic-Indic and extended Arabic-Indic digits.
     if before.isdecimal() and after.isdecimal():
         return False

@@ -36,6 +36,23 @@ class GeminiConfigurationTests(unittest.TestCase):
         self.assertEqual(options['model'], 'gemini-3.5-transcribe-live')
         self.assertEqual(options['api_key'], 'test-only')
 
+    def test_balkan_languages_cut_at_a_pause_after_8_seconds_others_unchanged(self):
+        env = {'GEMINI_STT_BACKEND': 'developer', 'GEMINI_API_KEY': 'test-only'}
+        for hint in ('bs-BA', 'hr-HR', 'sr-RS'):
+            with self.subTest(hint=hint):
+                options = adapter.gemini_provider_options(hint, env)
+                self.assertEqual((options['pause_cut_seconds'], options['min_cut_seconds'],
+                                  options['edge_padding_seconds']), (0.4, 8.0, 0.5))
+                provider = adapter.create_gemini_provider(language=hint[:2], language_hint=hint, env=env)
+                self.assertEqual(provider.boundary_revision, 'pause400ms_min8_pad0.5_max16_v1')
+        for hint in ('ar-EG', 'en-US', 'tr-TR', 'sq-AL'):
+            with self.subTest(hint=hint):
+                options = adapter.gemini_provider_options(hint, env)
+                for name in ('pause_cut_seconds', 'min_cut_seconds', 'edge_padding_seconds'):
+                    self.assertNotIn(name, options)
+                provider = adapter.create_gemini_provider(language=hint[:2], language_hint=hint, env=env)
+                self.assertEqual(provider.boundary_revision, 'punctuation_max16_no_pauses_v2')
+
     def test_classroom_selection_and_google_hint_remain_separate(self):
         provider = adapter.create_gemini_provider(language='ar-gemini', language_hint='ar-EG',
             env={'GEMINI_STT_BACKEND': 'developer', 'GEMINI_API_KEY': 'test-only'})

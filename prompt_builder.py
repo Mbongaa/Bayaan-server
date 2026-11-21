@@ -63,6 +63,26 @@ class PromptBuilder:
         "default": "Language notes ({target_lang}):\n- Keep in Arabic the Islamic terms that Muslim speakers of {target_lang} commonly use (for example du‘a, Sunnah, insha’Allah); translate other concepts into common {target_lang}."
     }
 
+    # Per-SOURCE-language notes, appended to every prompt (DB template or default) just before the
+    # source-language note when the speaker is transcribed in that language. The default prompt is
+    # written for Arabic; Bosnian imams use the same formulas in their own wording and spelling.
+    # Tested offline on two Gazi Husrev-begova khutbas into Dutch and English (Nov 2026).
+    _BCS_SOURCE_NOTES = (
+        "Source notes ({source_lang}):\n"
+        "- The imam speaks {source_lang}. The rules above that quote Arabic wording apply equally to the same formulas said in {source_lang}; the notes about Moroccan Darija do not apply. Arabic ayahs or du‘a recited inside the {source_lang} may be missing from the transcript, or arrive in Arabic script: translate whatever you receive.\n"
+        "- Blessing formulas: «sallallahu alejhi ve sellem», «s.a.v.s.», «a.s.» after the Prophet → ﷺ. «dželle šanuhu», «dž.š.», «subhanehu ve teala», «azze ve dželle», «tebareke ve teala» after Allah → ﷻ. «alejhisselam» («a.s.») after another prophet → (AS). «radijallahu anhu/anha/anhum» («r.a.») → (RA). «rahmetullahi alejhi» / «rahimehullah» → translated in words.\n"
+        "- {source_lang} Islamic words: hutba = khutbah, džuma = Jumu‘ah, namaz = salah/prayer, abdest = wudu, dova = du‘a, dženet = Paradise, džehennem = Jahannam, ahiret = the Hereafter, dunjaluk = this world, sevap = reward, takvaluk/takva = taqwa, tevba = repentance, sabur = patience, šehid = martyr (shahid), dženaza = funeral prayer (janazah), ummet = ummah, ajet = ayah/verse, hadis = hadith, sunnet = Sunnah, ashabi = the Companions (Sahabah), Poslanik / Allahov Poslanik / Resulullah = the Prophet / the Messenger of Allah, Kur'an-i Kerim = the Noble Qur'an. Treat them by the language notes above (keep the familiar Arabic term or translate it as listed there).\n"
+        "- Salutations: «Cijenjeni džemate» / «Poštovani džemate» = the congregation salutation (e.g. \"Beste broeders en zusters\", \"Dear brothers and sisters\"); «Draga braćo i sestre» = \"Dear brothers and sisters\"; «Allahovi robovi» = \"Servants of Allah\"; «Braćo vjernici» = \"Brothers in faith\".\n"
+        "- Live speech recognition splits {source_lang} speech at arbitrary points and can mishear words: a line may start or end mid-sentence, a word at its start or end may be cut off or misheard (e.g. a split or missing «ne», «se», «je», «li», a wrong case ending). Translate what the imam evidently meant from the context, never reverse a negation, and do not complete a fragment with words that were not spoken."
+    )
+    SOURCE_NOTES = {"Bosnian": _BCS_SOURCE_NOTES, "Croatian": _BCS_SOURCE_NOTES, "Serbian": _BCS_SOURCE_NOTES}
+
+    @classmethod
+    def source_notes(cls, source_lang: str) -> str:
+        """Notes for the speaker's language, or an empty string when it has none."""
+        notes = cls.SOURCE_NOTES.get(source_lang)
+        return notes.replace('{source_lang}', source_lang) if notes else ''
+
     @classmethod
     def language_notes(cls, target_lang: str) -> str:
         """Notes block for the {language_notes} template slot (falls back to the default block)."""

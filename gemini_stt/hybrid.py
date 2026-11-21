@@ -4,7 +4,9 @@ Draft punctuation requests an audio boundary. Only Google's authoritative final
 is committed. Captured audio after that boundary stays queued for the next one.
 """
 from __future__ import annotations
+import array
 import asyncio
+from collections import deque
 from dataclasses import dataclass
 import logging
 from google.genai import types
@@ -110,6 +112,23 @@ class _PunctuationStream(current.ResilientGeminiStream):
     def _punctuation_end_sample(self):
         return self._received_samples
 
+    def _edge_padding_pcm(self):
+        return bytes(int(getattr(self._provider, 'edge_padding_seconds', 0.0) * 16000) * 2)
+
+    async def _send_edge_padding(self):
+        """Synthetic silence around an activity's real audio (never a captured sample).
+
+        Google drops the first or last word of an activity whose speech starts or ends
+        right at its edge. Silence on both sides lets those words be recognised. The
+        padding counts towards the connection's audio for rotation.
+        """
+        padding = self._edge_padding_pcm()
+        if padding:
+            await asyncio.wait_for(self._guard(self._session.send_realtime_input(
+                audio=types.Blob(data=padding, mime_type='audio/pcm;rate=16000'))), self._opts.connect_timeout)
+            self._connection_samples += len(padding) // 2
+            self.stats['edge_padding_samples'] = self.stats.get('edge_padding_samples', 0) + len(padding) // 2
+
     def _accept_punctuation_marker(self, attempt, marker):
         return marker.boundary_reason == 'google_interim_punctuation'
 
@@ -117,6 +136,7 @@ class _PunctuationStream(current.ResilientGeminiStream):
         attempt = self._attempt = current._Attempt(window, number, asyncio.get_running_loop().create_future())
         begin_budget()
         await asyncio.wait_for(self._guard(self._session.send_realtime_input(activity_start=types.ActivityStart())), self._opts.connect_timeout)
+        await self._send_edge_padding()
         for chunk in window.chunks:
             begin_budget()
             await self._send_chunk(chunk, replay=number > 0)
@@ -151,6 +171,7 @@ class _PunctuationStream(current.ResilientGeminiStream):
             if not window.sealed:
                 healthy()
         begin_budget()
+        await self._send_edge_padding()
         attempt.end_sent = True
         await asyncio.wait_for(self._guard(self._session.send_realtime_input(activity_end=types.ActivityEnd())), self._opts.connect_timeout)
         try:
@@ -179,7 +200,7 @@ class _PunctuationStream(current.ResilientGeminiStream):
                 try:
                     text = await asyncio.wait_for(transcribe_window(
                         self._client, model=model,
-                        pcm=b''.join(chunk.pcm for chunk in window.chunks),
+                        pcm=self._edge_padding_pcm() + b''.join(chunk.pcm for chunk in window.chunks) + self._edge_padding_pcm(),
                         audio_config=self._provider._config.input_audio_transcription,
                     ), EOF_REQUEST_TIMEOUT_SECONDS)
                 except asyncio.CancelledError:
@@ -214,17 +235,42 @@ class _PunctuationStream(current.ResilientGeminiStream):
 
 
 class GeminiHybridSTT(current.ResilientGeminiSTT):
-    """STT-compatible stream factory with the chosen lab policy fixed in code."""
+    """STT-compatible stream factory with the chosen lab policy fixed in code.
+
+    By default an activity ends at Google's first draft punctuation or at 16 s.
+    ``pause_cut_seconds`` switches to cutting at the first real pause of that length
+    once the activity holds ``min_cut_seconds`` of audio (still 16 s at most), so cuts
+    lie in silence instead of wherever the draft punctuation happens to arrive.
+    ``edge_padding_seconds`` sends that much synthetic silence before and after each
+    activity's real audio, because Google drops words spoken right at an activity edge.
+    All default off; ``gemini_provider_options`` enables them per language.
+    """
     segmentation_mode = 'HYBRID_16S'
     boundary_revision = 'punctuation_max16_no_pauses_v2'
     max_segment_seconds = 16.0
     punctuation_stability = False
     earlier_translation = False
 
-    def __init__(self, *, transcription_mode='VERBATIM', **options):
+    def __init__(self, *, transcription_mode='VERBATIM', pause_cut_seconds=0.0, min_cut_seconds=0.0,
+                 edge_padding_seconds=0.0, **options):
         if transcription_mode != 'VERBATIM':
             raise ValueError('The promoted hybrid mode uses VERBATIM transcription')
+        for name, value, limit in (('pause_cut_seconds', pause_cut_seconds, 2),
+                                   ('min_cut_seconds', min_cut_seconds, self.max_segment_seconds - 1),
+                                   ('edge_padding_seconds', edge_padding_seconds, 2)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= limit:
+                raise ValueError(f'{name} must be between 0 and {limit:g}')
+        if min_cut_seconds and not pause_cut_seconds:
+            raise ValueError('min_cut_seconds applies to pause cuts only')
         super().__init__(transcription_mode=transcription_mode, **options)
+        self.pause_cut_seconds = float(pause_cut_seconds)
+        self.min_cut_seconds = float(min_cut_seconds)
+        self.edge_padding_seconds = float(edge_padding_seconds)
+        if self.pause_cut_seconds or self.edge_padding_seconds:
+            policy = (f'pause{self.pause_cut_seconds * 1000:g}ms_min{self.min_cut_seconds:g}'
+                      if self.pause_cut_seconds else 'punctuation')
+            pad = f'_pad{self.edge_padding_seconds:g}' if self.edge_padding_seconds else ''
+            self.boundary_revision = f'{policy}{pad}_max16_v1'
 
     def stream(self):
         stream = _HybridStream(self)
@@ -233,11 +279,56 @@ class GeminiHybridSTT(current.ResilientGeminiSTT):
         return stream
 
 
+PAUSE_QUIET_RATIO = 0.2      # a 10 ms frame is quiet below this share of the recent speech level
+PAUSE_QUIET_FLOOR = 60.0     # ... or below this absolute RMS
+_PAUSE_LEVEL_FRAMES = 300    # recent frames used for the speech level (3 s of 10 ms frames)
+
+
 class _HybridStream(_PunctuationStream):
     def __init__(self, provider):
         self._carry = None
         self._max_samples = int(provider.max_segment_seconds * 16000)
+        self._pause_cut_samples = int(getattr(provider, 'pause_cut_seconds', 0.0) * 16000)
+        self._min_cut_samples = int(getattr(provider, 'min_cut_seconds', 0.0) * 16000)
+        self._quiet_samples = 0
+        self._levels = deque(maxlen=_PAUSE_LEVEL_FRAMES)
         super().__init__(provider)
+
+    def _accept_punctuation_marker(self, attempt, marker):
+        expected = 'pause' if self._pause_cut_samples else 'google_interim_punctuation'
+        return marker.boundary_reason == expected
+
+    async def _emit(self, kind, text, language, attempt):
+        if self._pause_cut_samples:
+            # Pause mode ends activities only at real pauses (push_frame) or at 16 s.
+            return await _emit_window(self, kind, text, language, attempt)
+        return await super()._emit(kind, text, language, attempt)
+
+    def push_frame(self, frame):
+        super().push_frame(frame)
+        if not self._pause_cut_samples:
+            return
+        samples = array.array('h', frame.data.tobytes())
+        if not samples:
+            return
+        level = (sum(s * s for s in samples) / len(samples)) ** 0.5
+        self._levels.append(level)
+        speech = sorted(self._levels)[int(len(self._levels) * 0.7)]
+        quiet = level < max(PAUSE_QUIET_FLOOR, PAUSE_QUIET_RATIO * speech)
+        self._quiet_samples = self._quiet_samples + len(samples) if quiet else 0
+        attempt = self._attempt
+        if (attempt is not None and not attempt.end_sent and not attempt.window.sealed
+                and attempt.window.chunks and not getattr(attempt, 'punctuation_requested', False)
+                and self._received_samples - attempt.window.chunks[0].start_sample >= self._min_cut_samples
+                and self._quiet_samples >= self._pause_cut_samples):
+            # A real pause after the minimum length: end the activity right after this
+            # captured frame, so FIFO sample order holds and the cut lies in silence.
+            attempt.punctuation_requested = True
+            self._input.put_nowait(_PunctuationBoundary(attempt.window.id, attempt.number,
+                                                        self._received_samples, 'pause'))
+            logger.info('Pause boundary requested window=%s attempt=%s window_seconds=%.2f',
+                        attempt.window.id, attempt.number,
+                        (self._received_samples - attempt.window.chunks[0].start_sample) / 16000)
 
     async def _next_input(self):
         if self._carry is not None:

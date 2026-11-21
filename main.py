@@ -644,7 +644,7 @@ async def entrypoint(job: JobContext):
 
         track_key = (participant.identity, track.sid)
         if transcription_route(provider_lang).provider == 'gemini':
-            from gemini_track import run_gemini_track
+            from gemini_track import run_gemini_track_with_restarts
 
             async def publish_gemini(segment_id, text, language, final):
                 # Existing classroom consumers classify captions by this exact
@@ -660,8 +660,11 @@ async def entrypoint(job: JobContext):
                 await resource_manager.heartbeat_monitor.update_heartbeat(
                     participant.identity, tenant_context.get('session_id'))
 
+            this_task = asyncio.current_task()
             try:
-                await run_gemini_track(participant=participant, track=track,
+                await run_gemini_track_with_restarts(
+                    still_current=lambda: participant_tasks.get(track_key) is this_task,
+                    participant=participant, track=track,
                     provider=stt_provider, publish=publish_gemini,
                     translate=translate_confirmed, heartbeat=heartbeat)
             except asyncio.CancelledError:

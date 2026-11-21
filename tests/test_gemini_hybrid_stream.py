@@ -115,6 +115,85 @@ class GeminiHybridStreamTests(unittest.IsolatedAsyncioTestCase):
     async def make_hybrid(self, client, **options):
         return await self.make_stream(client, **options)
 
+    async def make_pause(self, client, **extra):
+        provider = GeminiHybridSTT(model='test', vertexai=False, api_key='fake', language='bs-BA',
+            pause_cut_seconds=0.4, min_cut_seconds=8.0, **extra,
+            recovery=current.RecoveryOptions(finalize_timeout=.5, connect_timeout=.5, retry_delay=.001,
+                                             max_retry_delay=.001, replay_speed=10000),
+            _client_factory=client.factory)
+        stream = provider.stream()
+        self.addAsyncCleanup(provider.aclose)
+        self.addAsyncCleanup(stream.aclose)
+        return provider, stream
+
+    def interim(self, client, text='Da. I'):
+        client.sessions[-1].incoming.put_nowait(event(interim_input_transcription=types.Transcription(text=text)))
+
+    async def test_pause_cut_ends_activities_only_at_a_real_pause_after_8_seconds(self):
+        client = Client()
+        _, stream = await self.make_pause(client)
+        early, pause_short = pcm(1000, 3 * 16000), [pcm(1, 160) for _ in range(50)]  # 0.5 s pause at 3 s
+        later = pcm(1000, 6 * 16000)
+        push(stream, early)
+        for frame in pause_short:
+            push(stream, frame)
+        push(stream, later)
+        await until(lambda: client.sessions and len(client.sessions[0].audio) == len(early) + 50 * 320 + len(later))
+        self.interim(client)  # draft punctuation never cuts in pause mode
+        await asyncio.sleep(.05)
+        self.assertEqual(client.activities, [])
+        pause = [pcm(1, 160) for _ in range(40)]  # 0.4 s of quiet after 9.5 s of audio
+        for frame in pause[:39]:
+            push(stream, frame)
+        await asyncio.sleep(.05)
+        self.assertEqual(client.activities, [])
+        push(stream, pause[39])
+        await until(lambda: len(client.activities) == 1)
+        first = early + b''.join(pause_short) + later + b''.join(pause)
+        self.assertEqual(client.activities[0], first)
+        tail = pcm(1000, 1600)
+        push(stream, tail)
+        stream.end_input()
+        finals = [e async for e in stream if e.type == stt.SpeechEventType.FINAL_TRANSCRIPT]
+        self.assertEqual(client.activities, [first, tail])
+        self.assertEqual([e.alternatives[0].metadata['boundary_reason'] for e in finals], ['pause', 'eof'])
+
+    async def test_pause_mode_still_cuts_continuous_speech_at_16_seconds(self):
+        client = Client()
+        _, stream = await self.make_pause(client)
+        speech = pcm(1000, 17 * 16000)
+        push(stream, speech)
+        await until(lambda: len(client.activities) == 1)
+        self.assertEqual(client.activities[0], speech[:16 * 32000])
+        stream.end_input()
+        finals = [e async for e in stream if e.type == stt.SpeechEventType.FINAL_TRANSCRIPT]
+        self.assertEqual([e.alternatives[0].metadata['boundary_reason'] for e in finals], ['duration_limit', 'eof'])
+        self.assertEqual(client.activities, [speech[:16 * 32000], speech[16 * 32000:]])
+
+    async def test_edge_padding_wraps_every_activity_and_keeps_captured_audio_exact(self):
+        client = Client()
+        _, stream = await self.make_pause(client, edge_padding_seconds=0.5)
+        pad = bytes(16000)  # 0.5 s of PCM16 silence
+        speech, tail = pcm(1000, 9 * 16000), pcm(1000, 1600)
+        push(stream, speech)
+        await until(lambda: client.sessions and bytes(client.sessions[0].audio) == pad + speech)
+        pause = [pcm(1, 160) for _ in range(40)]
+        for frame in pause:
+            push(stream, frame)
+        await until(lambda: len(client.activities) == 1)
+        push(stream, tail)
+        stream.end_input()
+        [e async for e in stream]
+        first = speech + b''.join(pause)
+        self.assertEqual(client.activities, [pad + first + pad, pad + tail + pad])
+        self.assertEqual(stream.stats['edge_padding_samples'], 4 * 8000)
+        self.assertEqual(stream.stats['replayed_samples'], 0)
+
+    def test_pause_options_are_validated(self):
+        for options in (dict(min_cut_seconds=8.0), dict(pause_cut_seconds=3.0), dict(edge_padding_seconds=-1)):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                GeminiHybridSTT(model='test', vertexai=False, api_key='fake', language='bs-BA', **options)
+
     async def test_hybrid_has_no_vad_pause_energy_or_soft8_cut(self):
         client = Client()
         provider,stream = await self.make_hybrid(client)
